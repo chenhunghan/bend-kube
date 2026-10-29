@@ -286,19 +286,125 @@ def Yaml.json_or(r: Result<&2, &2, String, J.Json>, s: String) -> J.Json:
     case Fail{e}:
       J.JStr{s}
 
-def Yaml.digits(s: String) -> Bool:
+# Numbers, as YAML 1.2's core schema reads them:
+# [-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?, read a character
+# at a time. The digits so far are kept reversed.
+type Num is Data:
+  NStart{}
+  NSign{neg: Bool}
+  NInt{neg: Bool, int: List<&2, Char>}
+  NDot0{neg: Bool}
+  NFrac{neg: Bool, int: List<&2, Char>, frac: List<&2, Char>}
+  NExp0{neg: Bool, int: List<&2, Char>, frac: List<&2, Char>, exp: List<&2, Char>}
+  NExp1{neg: Bool, int: List<&2, Char>, frac: List<&2, Char>, exp: List<&2, Char>}
+  NExpD{neg: Bool, int: List<&2, Char>, frac: List<&2, Char>, exp: List<&2, Char>}
+  NBad{}
+
+def Num.step(st: Num, +c: Char, dig: Bool, dot: Bool, ex: Bool, sg: Bool) -> Num:
+  match st dig dot ex sg:
+    case NStart{} True{} d e s:
+      NInt{False{}, [c]}
+    case NStart{} False{} True{} e s:
+      NDot0{False{}}
+    case NStart{} False{} False{} e True{}:
+      NSign{Char.is_eq(c, '-')}
+    case NStart{} False{} False{} e False{}:
+      NBad{}
+    case NSign{n} True{} d e s:
+      NInt{n, [c]}
+    case NSign{n} False{} True{} e s:
+      NDot0{n}
+    case NSign{n} False{} False{} e s:
+      NBad{}
+    case NInt{n, i} True{} d e s:
+      NInt{n, Con{c, i}}
+    case NInt{n, i} False{} True{} e s:
+      NFrac{n, i, Nil{}}
+    case NInt{n, i} False{} False{} True{} s:
+      NExp0{n, i, Nil{}, [c]}
+    case NInt{n, i} False{} False{} False{} s:
+      NBad{}
+    case NDot0{n} True{} d e s:
+      NFrac{n, Nil{}, [c]}
+    case NDot0{n} False{} d e s:
+      NBad{}
+    case NFrac{n, i, f} True{} d e s:
+      NFrac{n, i, Con{c, f}}
+    case NFrac{n, i, f} False{} d True{} s:
+      NExp0{n, i, f, [c]}
+    case NFrac{n, i, f} False{} d False{} s:
+      NBad{}
+    case NExp0{n, i, f, x} True{} d e s:
+      NExpD{n, i, f, Con{c, x}}
+    case NExp0{n, i, f, x} False{} d e True{}:
+      NExp1{n, i, f, Con{c, x}}
+    case NExp0{n, i, f, x} False{} d e False{}:
+      NBad{}
+    case NExp1{n, i, f, x} True{} d e s:
+      NExpD{n, i, f, Con{c, x}}
+    case NExp1{n, i, f, x} False{} d e s:
+      NBad{}
+    case NExpD{n, i, f, x} True{} d e s:
+      NExpD{n, i, f, Con{c, x}}
+    case NExpD{n, i, f, x} False{} d e s:
+      NBad{}
+    case NBad{} g d e s:
+      NBad{}
+
+def Num.go(s: String, st: Num) -> Num:
   match s:
     case SNil{}:
-      True{}
+      st
     case SCon{+c, t}:
-      Bool.and(Char.is_digit(c), Yaml.digits(t))
+      Num.go(t, Num.step(st, c, Char.is_digit(c), Char.is_eq(c, '.'),
+        Bool.or(Char.is_eq(c, 'e'), Char.is_eq(c, 'E')),
+        Bool.or(Char.is_eq(c, '-'), Char.is_eq(c, '+'))))
 
-# Plain integers are numbers, as YAML 1.2's core schema reads them.
-def Yaml.plain.num(x: String, int: Bool) -> J.Json:
-  match int:
+def Num.sign(neg: Bool) -> String:
+  match neg:
     case True{}:
-      J.JNum{x}
+      "-"
     case False{}:
+      ""
+
+# The integer digits without leading zeros, "0" for none.
+def Num.int(cs: List<&2, Char>) -> String:
+  match cs:
+    case Nil{}:
+      "0"
+    case Con{'0', t}:
+      Num.int(t)
+    case Con{c, t}:
+      String.from_list(Con{c, t})
+
+def Num.frac(f: List<&2, Char>) -> String:
+  match f:
+    case Nil{}:
+      ""
+    case Con{c, t}:
+      "." ++ String.from_list(List.reverse(&2, Char, Con{c, t}))
+
+# The number as JSON writes it, or None when s is not one.
+def Num.fin(st: Num) -> Maybe<&2, String>:
+  match st:
+    case NInt{n, i}:
+      Some{Num.sign(n) ++ Num.int(List.reverse(&2, Char, i))}
+    case NFrac{n, i, f}:
+      Some{Num.sign(n) ++ Num.int(List.reverse(&2, Char, i)) ++ Num.frac(f)}
+    case NExpD{n, i, f, x}:
+      Some{Num.sign(n) ++ Num.int(List.reverse(&2, Char, i)) ++ Num.frac(f) ++
+        String.from_list(List.reverse(&2, Char, x))}
+    case _:
+      None{}
+
+def Num.parse(s: String) -> Maybe<&2, String>:
+  Num.fin(Num.go(s, NStart{}))
+
+def Yaml.plain.num(x: String, n: Maybe<&2, String>) -> J.Json:
+  match n:
+    case Some{t}:
+      J.JNum{t}
+    case None{}:
       J.JStr{x}
 
 # A plain scalar: null, ~, true, false, or a string.
@@ -313,7 +419,7 @@ def Yaml.plain(s: String) -> J.Json:
     case "false":
       J.JBool{False{}}
     case +x:
-      Yaml.plain.num(x, Bool.and(Bool.not(String.is_empty(x)), Yaml.digits(x)))
+      Yaml.plain.num(x, Num.parse(x))
 
 def Flow.peek(s: String) -> Char:
   match s:

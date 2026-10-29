@@ -4,3 +4,4 @@
 {"ca":"-----BEGIN-----\nabc\n\ndef\n-----END-----\n","note":"folded text\npara","keep":"x\n\n","items":["one\ntwo\n","plain"],"after":"done"}
 {"base":{"image":"nginx","port":80},"name":"web","svc":{"port":8080,"owner":"web","image":"nginx"},"list":[{"a":1},{"a":1},null,"123","plain"]}
 [{"a":1},{"b":[2]}]
+{"a":-5,"b":7,"c":-0.5,"d":1e3,"e":2.5E-3,"f":0.5,"g":5,"h":7,"i":0,"j":-0,"k":"1.2.3","l":"-","m":".","n":"e5","o":"5e","p":"0x1F","q":".inf","r":"12abc","s":[-1,2.0]}

@@ -404,7 +404,9 @@ Boundaries:
 - **YAML subset.** The YAML reader covers block and flow collections,
   block scalars (`|`, `>`, with chomping), anchors, aliases, merge keys
   (`<<`), tags (`!!str`; others ignored) and multi-document streams
-  (`Yaml.parse_all`). It doesn't support complex keys (`? `) or anchors
-  on inline `- key:` maps.
+  (`Yaml.parse_all`). Plain scalars resolve by YAML 1.2's core schema:
+  null, booleans, and numbers (`-5`, `0.5`, `1e3`, written as JSON writes
+  them; `0x1F` and `.inf` stay strings). It doesn't support complex keys
+  (`? `) or anchors on inline `- key:` maps.
 - **Fuel.** Loops count down fuel of 4,294,967,295 steps so they terminate
   by structure; at a few steps a second that is years.

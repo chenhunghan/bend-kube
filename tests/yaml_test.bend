@@ -11,3 +11,4 @@ def main() -> IO(Unit):
     IO.print(J.Json.show(Y.Yaml.parse("base: &b\n  image: nginx\n  port: 80\nname: &n web\nsvc:\n  <<: *b\n  port: 8080\n  owner: *n\nlist:\n- &item\n  a: 1\n- *item\n-\n- !!str 123\n- !custom plain\n")))
     IO.print(J.Json.show(J.Json.arr(Y.Yaml.parse_all("---\na: 1\n---\n# empty doc\n---\nb: [2]\n...\n"))))
 
+    IO.print(J.Json.show(Y.Yaml.parse("a: -5\nb: +7\nc: -0.5\nd: 1e3\ne: 2.5E-3\nf: .5\ng: 5.\nh: 007\ni: 0\nj: -0\nk: 1.2.3\nl: -\nm: .\nn: e5\no: 5e\np: 0x1F\nq: .inf\nr: 12abc\ns: [-1, 2.0]\n")))
