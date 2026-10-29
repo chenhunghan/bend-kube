@@ -21,10 +21,10 @@ case "$have" in *"$need_bend"*) ;; *) echo "bend $need_bend required (have: $hav
 step() { printf '\n== %s\n' "$*"; }
 
 step "laws"
-out=$(bend PROOF.bend 2>&1); echo "$out" | tail -2
-echo "$out" | grep -q "ALL PROOFS CHECK"
-out=$(bend PROOF.bend --verdict 2>&1); echo "$out" | tail -1
-echo "$out" | grep -q "ALL PROOFS CHECK"
+out=$(bend PROOF.bend 2>&1) || true; echo "$out" | tail -2
+echo "$out" | grep -q "ALL PROOFS CHECK" || { echo "$out"; exit 1; }
+out=$(bend PROOF.bend --verdict 2>&1) || true; echo "$out" | tail -1
+echo "$out" | grep -q "ALL PROOFS CHECK" || { echo "$out"; exit 1; }
 
 step "pure modules"
 for m in json utf8 base64 yaml http core config proxy watcher store queue lease time finalizer typed; do
