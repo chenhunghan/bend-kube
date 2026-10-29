@@ -43,6 +43,11 @@ def Tls.send(sock: Socket, text: String, ms: U32) -> IO(Socket & Res(Unit)):
   import "./effs/tls.c"
   import "./effs/tls.js"
 
+# Sends raw bytes (each 0..255); ms bounds the whole send (0: no deadline).
+def Tls.send_bytes(sock: Socket, bytes: List<&2, U32>, ms: U32) -> IO(Socket & Res(Unit)):
+  import "./effs/tls.c"
+  import "./effs/tls.js"
+
 # Up to max bytes (0: 16KiB); an empty list is the end of the stream. ms
 # bounds the wait (0: none), past which it fails with ETIMEDOUT (60).
 def Tls.recv(sock: Socket, max: U32, ms: U32) -> IO(Socket & Res(List<&2, U32>)):

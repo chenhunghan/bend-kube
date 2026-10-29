@@ -47,6 +47,7 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/typed.bend` + `tools/gen.py` | k8s-openapi and kube-derive: typed records from OpenAPI or CRD schemas | yes |
 | `src/utf8.bend`, `src/base64.bend`, `src/time.bend` | std / chrono | yes |
 | `src/http.bend` | hyper's HTTP/1.1 codec | yes |
+| `src/ws.bend` | WebSocket framing (RFC 6455) | yes |
 | `src/core.bend` | kube-core: `ApiResource`, `Request`, params, `WatchEvent`, `Status`, `ObjectRef` | yes |
 | `src/config.bend` | kube-client `Config`, kubeconfig, in-cluster | yes |
 | `src/watcher.bend` | kube-runtime `watcher`, client-go `Reflector` | yes |
@@ -58,6 +59,8 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/net.bend` + `src/effs/tls.c` | rustls / crypto/tls (OpenSSL via `dlopen`) | effect |
 | `src/sys.bend` + `src/effs/sys.c` | wall clock, SIGTERM | effect |
 | `src/client.bend` | kube-client `Client`, `Api<K>` verbs | IO |
+| `src/stream.bend` | kube-client `log_stream`: a streaming GET, such as a followed pod log | IO |
+| `src/exec.bend` | kube-client `exec` (`v5.channel.k8s.io` over WebSocket) | IO |
 | `src/runtime.bend` | kube-runtime `Controller` | IO |
 | `src/leader.bend` | client-go `leaderelection.RunOrDie` | IO |
 | `src/helpers.bend` | kube-runtime `finalizer()`, client-go `EventRecorder` | IO |
@@ -186,11 +189,28 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
     then goes through the CONNECT tunnel, and TLS verification stays end
     to end with the API server.
 - The effects only dial, handshake and move bytes (`Tls.dial`,
-  `Tls.secure`, `Tls.send`, `Tls.recv`, `Tls.close`); see the trust
+  `Tls.secure`, `Tls.send`, `Tls.send_bytes`, `Tls.recv`, `Tls.close`); see the trust
   boundary under Scope.
 - Names resolve through DNS, and IPv6 is supported.
 - SIGPIPE is ignored, so a dead peer shows up as an error instead of
   killing the process.
+
+**Logs and exec** (kube-client's `log_stream` and `exec`):
+
+- `Stream.get(~on, cfg, path, ms)` sends a GET on a connection of its own
+  and hands every cut of the body to `on` as it is decoded, until the body
+  ends. `Stream.log_path(ns, pod, container, True{})` names a followed
+  pod log, which ends when the container does. A status other than 200
+  fails with the Status message the body carries.
+- `Exec.run(cfg, ns, pod, container, cmd, stdin, ms)` runs a command the
+  way `kubectl exec` does: a WebSocket upgrade speaking
+  `v5.channel.k8s.io`, the first version that can close stdin, so a
+  command reading stdin to its end works. The input goes in one write,
+  then stdin closes. Stdout, stderr and the final Status are collected
+  (`Exec.ok`, `Exec.why`, `Exec.stdout`, `Exec.stderr`), so it suits short
+  commands. A refused upgrade (for example 403 or 404) is a KApi error.
+- Frames are decoded byte by byte (`src/ws.bend`), so frames split across
+  reads, or several in one read, decode the same. Pings are not answered.
 
 **Operations:**
 

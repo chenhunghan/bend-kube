@@ -518,6 +518,26 @@ Term tls_send_run(Env e, Term* f, IoWork* w) {
   return tls_send_more(e, w);
 }
 
+// Tls.send_bytes(sock, bytes, ms): the same, for raw bytes; a value past
+// 255 fails with EINVAL before any byte is sent.
+Term tls_send_bytes_run(Env e, Term* f, IoWork* w) {
+  w->hand = (intptr_t)io_hand_v(f[0]);
+  if (w->hand < 0 || w->hand >= 65536 || tls_conn[w->hand] == NULL) {
+    return io_tup(e, f[0], io_fail(e, EBADF, "TLS: not a TLS socket"));
+  }
+  for (Term s = f[1]; term_aux(s) == CID(Con);) {
+    u64 l = term_peek(e.mem, s);
+    if (e.mem[l] > 255) {
+      return io_tup(e, f[0], io_fail(e, EINVAL, "TLS: a byte past 255"));
+    }
+    s = e.mem[l + 1];
+  }
+  w->data = io_cbuf(e, f[1], &w->size, CID(Con));
+  w->made = 0;
+  w->time = (u32)f[2] == 0 ? 0 : io_until(f[2]);
+  return tls_send_more(e, w);
+}
+
 // Recv: up to w->size bytes into w->data. An empty list is the end.
 static Term tls_recv_more(Env e, IoWork* w) {
   int   fd  = (int)w->hand;
@@ -600,6 +620,12 @@ static void __attribute__((constructor)) tls_secure_use(void) {
 #ifdef CID(Tls.send)
 static void __attribute__((constructor)) tls_send_use(void) {
   io_eff(CID(Tls.send), tls_send_run);
+}
+#endif
+
+#ifdef CID(Tls.send_bytes)
+static void __attribute__((constructor)) tls_send_bytes_use(void) {
+  io_eff(CID(Tls.send_bytes), tls_send_bytes_run);
 }
 #endif
 

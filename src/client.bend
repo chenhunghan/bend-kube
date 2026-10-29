@@ -210,14 +210,23 @@ def Conn.keep(keep: Bool) -> String:
     case False{}:
       "close"
 
+def Conn.connection(keep: Bool, own: Bool) -> List<&2, H.Header>:
+  match own:
+    case True{}:
+      Nil{}
+    case False{}:
+      [H.Header{"Connection", Conn.keep(keep)}]
+
 # The request's text, with the path under the server's base, our headers,
-# and Connection: keep-alive (pooled) or close.
+# and Connection: keep-alive (pooled) or close, unless the request names
+# its own (an Upgrade).
 def Conn.render(req: H.Req, +base: String, +host: String, +token: String, keep: Bool) -> String:
   match req:
-    case H.Req{m, path, hs, body}:
+    case H.Req{m, path, +hs, body}:
       H.Http.render(H.Req{m, base ++ path,
         List.append(&2, H.Header, hs, List.append(&2, H.Header, Conn.auth(token),
-          [H.Header{"User-Agent", Conn.user_agent()}, H.Header{"Connection", Conn.keep(keep)}])),
+          Con{H.Header{"User-Agent", Conn.user_agent()},
+            Conn.connection(keep, Maybe.is_some(&2, String, H.Http.find(hs, "connection")))})),
         body}, host)
 
 def Conn.host_header.go(h: String, +p: U32, v6: Bool) -> String:

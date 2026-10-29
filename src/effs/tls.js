@@ -150,6 +150,16 @@ function tls_send(sock, text, ms) {
   return io_tup(sock, io_done({ $: CID(Unit) }));
 }
 
+function tls_send_bytes(sock, data, ms) {
+  const st = tls_state.get(sock);
+  if (st === undefined) return io_tup(sock, io_fail(9));
+  const b = io_unlist(data);
+  if (b === null) return io_tup(sock, io_fail(22, "TLS: a byte past 255"));
+  if (st.error !== undefined) return io_tup(sock, io_fail(32, "TLS: " + st.error));
+  tls_start().port.postMessage({ op: "send", id: sock, bytes: b });
+  return io_tup(sock, io_done({ $: CID(Unit) }));
+}
+
 function tls_recv(sock, max, ms, k) {
   const st = tls_state.get(sock);
   if (st === undefined) return io_tup(sock, io_fail(9));
@@ -183,5 +193,6 @@ function tls_close(sock) {
 io_eff(CID(Tls.dial), tls_dial);
 io_eff(CID(Tls.secure), tls_secure);
 io_eff(CID(Tls.send), tls_send);
+io_eff(CID(Tls.send_bytes), tls_send_bytes);
 io_eff(CID(Tls.recv), tls_recv);
 io_eff(CID(Tls.close), tls_close);

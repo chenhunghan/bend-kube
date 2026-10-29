@@ -9,6 +9,7 @@ import ./src/base64.bend as Base64
 import ./src/client.bend as Client
 import ./src/config.bend as Config
 import ./src/core.bend as Core
+import ./src/exec.bend as Exec
 import ./src/finalizer.bend as Finalizer
 import ./src/helpers.bend as Helpers
 import ./src/http.bend as Http
@@ -23,9 +24,11 @@ import ./src/queue.bend as Queue
 import ./src/runtime.bend as Runtime
 import ./src/serve.bend as Serve
 import ./src/store.bend as Store
+import ./src/stream.bend as Stream
 import ./src/sys.bend as Sys
 import ./src/time.bend as Time
 import ./src/typed.bend as Typed
 import ./src/utf8.bend as Utf8
 import ./src/watcher.bend as Watcher
+import ./src/ws.bend as Ws
 import ./src/yaml.bend as Yaml

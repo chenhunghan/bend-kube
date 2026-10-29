@@ -27,13 +27,13 @@ out=$(bend PROOF.bend --verdict 2>&1) || true; echo "$out" | tail -1
 echo "$out" | grep -q "ALL PROOFS CHECK" || { echo "$out"; exit 1; }
 
 step "pure modules"
-for m in json utf8 base64 yaml http core config proxy watcher store queue lease time finalizer typed; do
+for m in json utf8 base64 yaml http ws core config proxy watcher store queue lease time finalizer typed; do
   out=$(bend src/$m.bend --check-only 2>&1) || true
   if echo "$out" | grep -q "ALL PROOFS CHECK"; then echo "ok   $m"; else echo "FAIL $m"; echo "$out"; exit 1; fi
 done
 
 step "IO modules"
-for m in net sys client log runtime leader serve helpers kube; do
+for m in net sys client stream exec log runtime leader serve helpers kube; do
   out=$(bend src/$m.bend --check-only 2>&1) || true
   # The only acceptable complaint is the foreign effects themselves.
   rest=$(echo "$out" | grep -v "SOME PROOFS FAIL\|rely on unsafe or foreign code\|defs that depend on foreign effects\|^Hint: no law" || true)
