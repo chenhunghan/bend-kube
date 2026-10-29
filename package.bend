@@ -1,7 +1,7 @@
-# The package entry: `bend package.bend --publish bend-kube@X.Y.Z.0`
+# The package entry: `bend package.bend --publish bend-kube-runtime@X.Y.Z.0`
 # ships every file imported here. Consumers import the modules
 # directly, for example:
-#   import bend-kube@0.1.0.0/src/kube.bend as Kb
+#   import bend-kube-runtime@0.1.0.0/src/kube.bend as Kb
 # PROOF.bend rides along, so the laws can be rechecked from the hub.
 import Base
 import ./PROOF.bend as Proof

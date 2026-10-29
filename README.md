@@ -11,18 +11,19 @@ ignores them.
 The rules that matter are stated as laws in `LAWS.bend` and proven in
 `PROOF.bend`; `bend PROOF.bend` gates every commit and image build.
 
-It is published on BendHub, so a controller imports it by name and
+It is published on BendHub as `bend-kube-runtime` (the hub auctions
+names under 12 characters), so a controller imports it by name and
 version; `bend` fetches and caches the package (in `~/.bend/lib`) on first
 use, checking every file against its hash:
 
 <!-- x-release-please-start-version -->
 ```python
 import Base
-import bend-kube@0.1.0.0/src/json.bend as J
-import bend-kube@0.1.0.0/src/core.bend as C
-import bend-kube@0.1.0.0/src/config.bend as K
-import bend-kube@0.1.0.0/src/queue.bend as Q
-import bend-kube@0.1.0.0/src/kube.bend as Kb
+import bend-kube-runtime@0.1.0.0/src/json.bend as J
+import bend-kube-runtime@0.1.0.0/src/core.bend as C
+import bend-kube-runtime@0.1.0.0/src/config.bend as K
+import bend-kube-runtime@0.1.0.0/src/queue.bend as Q
+import bend-kube-runtime@0.1.0.0/src/kube.bend as Kb
 
 def reconcile(o: J.Json, cfg: K.Config) -> IO(Q.Action):
   # make the world match o, idempotently; then say when to look again
@@ -35,7 +36,7 @@ def main() -> IO(Unit):
 <!-- x-release-please-end -->
 
 The hub wants four-number versions: release `vX.Y.Z` is
-`bend-kube@X.Y.Z.0`. Inside this repo, the examples import `../src/`.
+`bend-kube-runtime@X.Y.Z.0`. Inside this repo, the examples import `../src/`.
 
 ## Layout
 
@@ -288,7 +289,7 @@ above). Merging that pull request:
 1. tags `vX.Y.Z` and makes a GitHub release;
 2. reruns every gate on the tag;
 3. publishes `package.bend` and everything it imports to BendHub as
-   `bend-kube@X.Y.Z.0`. A publish is public and permanent.
+   `bend-kube-runtime@X.Y.Z.0`. A publish is public and permanent.
 
 Publishing needs the `BENDAI_KEY` repository secret: the `key` field of
 `~/.bend/bendai.json` after `bend login`.

@@ -1,7 +1,7 @@
 # Releases follow release-please: each push to master updates a release
 # pull request from the conventional commits since the last release;
 # merging it tags vX.Y.Z, makes a GitHub release, and publishes the
-# package to BendHub as bend-kube@X.Y.Z.0 (the hub wants four numbers).
+# package to BendHub as bend-kube-runtime@X.Y.Z.0 (the hub wants four numbers).
 # Publishing needs the BENDAI_KEY secret: the "key" from ~/.bend/bendai.json
 # after `bend login`.
 name: release
@@ -44,12 +44,12 @@ jobs:
           BENDAI_KEY: ${{ secrets.BENDAI_KEY }}
         run: |
           set -eu
-          if hash=$(curl -fs "https://hub.bend-lang.com/name/bend-kube@$VERSION"); then
-            echo "bend-kube@$VERSION is already published as $hash"; exit 0
+          if hash=$(curl -fs "https://hub.bend-lang.com/name/bend-kube-runtime@$VERSION"); then
+            echo "bend-kube-runtime@$VERSION is already published as $hash"; exit 0
           fi
           [ -n "$BENDAI_KEY" ] || { echo "the BENDAI_KEY secret is not set"; exit 1; }
           umask 077; mkdir -p "$HOME/.bend"
           printf '{"key":"%s","login":"ci"}\n' "$BENDAI_KEY" > "$HOME/.bend/bendai.json"
-          bend package.bend --publish "bend-kube@$VERSION"
+          bend package.bend --publish "bend-kube-runtime@$VERSION"
           rm -f "$HOME/.bend/bendai.json"
-          echo "import bend-kube@$VERSION/src/kube.bend as Kb" >> "$GITHUB_STEP_SUMMARY"
+          echo "import bend-kube-runtime@$VERSION/src/kube.bend as Kb" >> "$GITHUB_STEP_SUMMARY"
