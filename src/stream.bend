@@ -11,13 +11,13 @@ import ./client.bend as Cl
 # ======
 #
 # A GET whose body arrives over time, such as a pod's log with
-# follow=true: each cut of body bytes goes to a callback as it is decoded
-# (chunked, sized, or read until close), until the body ends. A status
-# other than 200 is a KApi error carrying the body's Status message. The
-# connection is the stream's own, never pooled.
+# follow=true: each cut of body bytes is folded into a state by a callback
+# as it is decoded (chunked, sized, or read until close), until the body
+# ends. A status other than 200 is a KApi error carrying the body's Status
+# message. The connection is the stream's own, never pooled.
 
-def Res() -> Type:
-  Result<&2, &2, Cl.KErr, Unit>
+def Res(-S: Type) -> Type:
+  Result<&1, &1, Cl.KErr, S>
 
 # What the loop just saw: bytes (or a failure) from a recv, or the decoder
 # after them with the body bytes it decoded, whether the server failed or
@@ -84,63 +84,65 @@ def Stream.recv(s: Socket, +ms: U32) ->
   IO(Socket & Result<&1, &1, U32 & String, List<&2, U32>>):
   N.Tls.recv(s, 65536, ms)
 
-# Reads until the body ends; bad holds the body of a refusal. Answers the
-# socket and the outcome.
-def Stream.loop(~on: List<&2, U32> -> IO(Unit), fuel: Nat, ev: SEv, +bad: List<&2, U32>,
-  +ms: U32) -> IO(Socket & Res()):
+# Reads until the body ends, folding the body into st; bad holds the body
+# of a refusal. Answers the socket and the outcome.
+def Stream.loop(~S: Type, ~on: S -> List<&2, U32> -> IO(S), fuel: Nat, ev: SEv, st: S,
+  +bad: List<&2, U32>, +ms: U32) -> IO(Socket & Res(S)):
   match fuel ev:
     case 0n SGot{s, rp, r}:
-      IO.pure(Socket & Res(), (s, Fail{Cl.KNet{0, "stream: too long"}}))
+      IO.pure(Socket & Res(S), (s, Fail{Cl.KNet{0, "stream: too long"}}))
     case 0n SChk{s, r, b, er, ok, h, em, fin, c}:
-      IO.pure(Socket & Res(), (s, Fail{Cl.KNet{0, "stream: too long"}}))
+      IO.pure(Socket & Res(S), (s, Fail{Cl.KNet{0, "stream: too long"}}))
     case 1n+f SGot{s, rp, Done{+bs}}:
-      Stream.loop(~on, f, Stream.fed(s, bs, rp), bad, ms)
+      Stream.loop(~S, ~on, f, Stream.fed(s, bs, rp), st, bad, ms)
     case 1n+f SGot{s, rp, Fail{(c, m)}}:
-      IO.pure(Socket & Res(), (s, Fail{Cl.KNet{c, "stream: recv: " ++ m}}))
+      IO.pure(Socket & Res(S), (s, Fail{Cl.KNet{c, "stream: recv: " ++ m}}))
     case 1n+f SChk{s, r, b, Some{m}, ok, h, em, fin, c}:
-      IO.pure(Socket & Res(), (s, Fail{Cl.KNet{0, "stream: " ++ m}}))
+      IO.pure(Socket & Res(S), (s, Fail{Cl.KNet{0, "stream: " ++ m}}))
     case 1n+f SChk{s, +r, b, None{}, True{}, h, False{}, fin, +c}:
-      IO.bind(Unit, Socket & Res(), on(b),
-        u => Stream.loop(~on, f, SChk{s, r, Nil{}, None{}, True{}, True{}, True{}, fin, c}, bad,
-          ms))
+      IO.bind(S, Socket & Res(S), on(st, b),
+        st2 => Stream.loop(~S, ~on, f, SChk{s, r, Nil{}, None{}, True{}, True{}, True{}, fin, c},
+          st2, bad, ms))
     case 1n+f SChk{s, r, b, None{}, True{}, h, True{}, True{}, c}:
-      IO.pure(Socket & Res(), (s, Done{Unit{}}))
+      IO.pure(Socket & Res(S), (s, Done{st}))
     case 1n+f SChk{s, +r, b, None{}, True{}, h, True{}, False{}, c}:
-      IO.bind(Socket & Result<&1, &1, U32 & String, List<&2, U32>>, Socket & Res(),
-        Stream.recv(s, ms), p => Stream.loop(~on, f, SEv.got(p, r), bad, ms))
+      IO.bind(Socket & Result<&1, &1, U32 & String, List<&2, U32>>, Socket & Res(S),
+        Stream.recv(s, ms), p => Stream.loop(~S, ~on, f, SEv.got(p, r), st, bad, ms))
     case 1n+f SChk{s, r, b, None{}, False{}, True{}, em, True{}, +c}:
-      IO.pure(Socket & Res(), (s, Fail{Stream.refused(c, List.append(&2, U32, bad, b))}))
+      IO.pure(Socket & Res(S), (s, Fail{Stream.refused(c, List.append(&2, U32, bad, b))}))
     case 1n+f SChk{s, +r, b, None{}, False{}, True{}, em, False{}, c}:
-      IO.bind(Socket & Result<&1, &1, U32 & String, List<&2, U32>>, Socket & Res(),
-        Stream.recv(s, ms), p => Stream.loop(~on, f, SEv.got(p, r), List.append(&2, U32, bad, b), ms))
+      IO.bind(Socket & Result<&1, &1, U32 & String, List<&2, U32>>, Socket & Res(S),
+        Stream.recv(s, ms),
+        p => Stream.loop(~S, ~on, f, SEv.got(p, r), st, List.append(&2, U32, bad, b), ms))
     case 1n+f SChk{s, r, b, None{}, False{}, False{}, em, True{}, c}:
-      IO.pure(Socket & Res(), (s, Fail{Cl.KNet{0, "stream: connection closed before a response"}}))
+      IO.pure(Socket & Res(S), (s, Fail{Cl.KNet{0, "stream: connection closed before a response"}}))
     case 1n+f SChk{s, +r, b, None{}, False{}, False{}, em, False{}, c}:
-      IO.bind(Socket & Result<&1, &1, U32 & String, List<&2, U32>>, Socket & Res(),
-        Stream.recv(s, ms), p => Stream.loop(~on, f, SEv.got(p, r), bad, ms))
+      IO.bind(Socket & Result<&1, &1, U32 & String, List<&2, U32>>, Socket & Res(S),
+        Stream.recv(s, ms), p => Stream.loop(~S, ~on, f, SEv.got(p, r), st, bad, ms))
 
-def Stream.close(p: Socket & Res()) -> IO(Res()):
+def Stream.close(~S: Type, p: Socket & Res(S)) -> IO(Res(S)):
   match p:
     case (s, r):
-      IO.bind(Unit, Res(), N.Tls.close(s), u => IO.pure(Res(), r))
+      IO.bind(Unit, Res(S), N.Tls.close(s), u => IO.pure(Res(S), r))
 
-def Stream.opened(~on: List<&2, U32> -> IO(Unit), t: Result<&1, &1, U32 & String, N.Tls>, +ms: U32) ->
-  IO(Res()):
+def Stream.opened(~S: Type, ~on: S -> List<&2, U32> -> IO(S), st: S,
+  t: Result<&1, &1, U32 & String, N.Tls>, +ms: U32) -> IO(Res(S)):
   match t:
     case Done{N.Tls{s}}:
-      IO.bind(Socket & Res(), Res(),
-        Stream.loop(~on, 4294967295n,
-          SChk{s, H.Http.resp.init(), Nil{}, None{}, False{}, False{}, True{}, False{}, 0}, Nil{},
-          ms), Stream.close)
+      IO.bind(Socket & Res(S), Res(S),
+        Stream.loop(~S, ~on, 4294967295n,
+          SChk{s, H.Http.resp.init(), Nil{}, None{}, False{}, False{}, True{}, False{}, 0}, st,
+          Nil{}, ms), p => Stream.close(~S, p))
     case Fail{(c, m)}:
-      IO.pure(Res(), Fail{Cl.KNet{c, m}})
+      IO.pure(Res(S), Fail{Cl.KNet{c, m}})
 
-# GETs path (with its query) and hands each cut of the body to on, in
-# order, until the body ends. ms bounds each wait for bytes (0: none; a
-# followed log may stay quiet for long).
-def Stream.get(~on: List<&2, U32> -> IO(Unit), +cfg: K.Config, path: String, +ms: U32) -> IO(Res()):
-  IO.bind(Result<&1, &1, U32 & String, N.Tls>, Res(),
-    Cl.Conn.open(cfg, H.Req{"GET", path, Nil{}, ""}, False{}), t => Stream.opened(~on, t, ms))
+# GETs path (with its query) and folds each cut of the body into st with
+# on, in order, until the body ends: Done with the last state. ms bounds
+# each wait for bytes (0: none; a followed log may stay quiet for long).
+def Stream.fold(~S: Type, ~on: S -> List<&2, U32> -> IO(S), st: S, +cfg: K.Config, path: String,
+  +ms: U32) -> IO(Res(S)):
+  IO.bind(Result<&1, &1, U32 & String, N.Tls>, Res(S),
+    Cl.Conn.open(cfg, H.Req{"GET", path, Nil{}, ""}, False{}), t => Stream.opened(~S, ~on, st, t, ms))
 
 # The log of a pod's container, followed while it runs (follow=true): the
 # stream ends when the container does.

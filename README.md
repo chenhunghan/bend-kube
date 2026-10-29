@@ -197,11 +197,12 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
 
 **Logs and exec** (kube-client's `log_stream` and `exec`):
 
-- `Stream.get(~on, cfg, path, ms)` sends a GET on a connection of its own
-  and hands every cut of the body to `on` as it is decoded, until the body
-  ends. `Stream.log_path(ns, pod, container, True{})` names a followed
-  pod log, which ends when the container does. A status other than 200
-  fails with the Status message the body carries.
+- `Stream.fold(~S, ~on, st, cfg, path, ms)` sends a GET on a connection of
+  its own and folds every cut of the body into the state `st` with `on`
+  as it is decoded, until the body ends; it answers the last state.
+  `Stream.log_path(ns, pod, container, True{})` names a followed pod log,
+  which ends when the container does. A status other than 200 fails with
+  the Status message the body carries.
 - `Exec.run(cfg, ns, pod, container, cmd, stdin, ms)` runs a command the
   way `kubectl exec` does: a WebSocket upgrade speaking
   `v5.channel.k8s.io`, the first version that can close stdin, so a
