@@ -257,7 +257,7 @@ tests/run.sh                     # unit and scenario tests (UPDATE=1 rewrites ex
 tests/tls.sh                     # TLS and proxies against local servers, both lanes, sanitizers
 tests/package.sh                 # publish to a stand-in hub, build a controller from the package
 KUBECONFIG=test.yaml tests/e2e.sh   # proxy tunnel, typed operator, finalizer, shared watches, on a disposable cluster
-./y2j crd.yaml > crd.json && tools/gen.py crd crd.json -o gen/my.bend   # typed CRD views
+./y2j crd.yaml > crd.json && tools/gen.py crd crd.json -o gen/my.bend   # typed CRD views (--lib bend-kube-runtime@X.Y.Z.0/src outside this repo)
 cd examples && bend mirror.bend -o mirror && KUBECONFIG=~/.kube/config ./mirror
 docker build --build-arg EXAMPLE=mirror -t bend-kube-mirror .   # proof-gated image
 kubectl apply -f deploy/mirror.yaml

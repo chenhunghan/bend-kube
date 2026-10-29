@@ -197,12 +197,14 @@ def main():
     ap.add_argument("--plural")
     ap.add_argument("--cluster", action="store_true", help="cluster-scoped (openapi mode)")
     ap.add_argument("--depth", type=int, default=8)
-    ap.add_argument("--lib", help="path of src/ relative to the output (default: computed)")
+    ap.add_argument("--lib", help="path of src/ relative to the output (default: computed), "
+                    "or a BendHub package's, like bend-kube-runtime@0.1.1.0/src")
     a = ap.parse_args()
     doc = json.load(open(a.schema))
     lib = a.lib or os.path.relpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"),
                                    os.path.dirname(os.path.abspath(a.out)))
-    if not lib.startswith("."):
+    # A package path (name@version/...) is imported as is.
+    if not lib.startswith(".") and "@" not in lib.split("/")[0]:
         lib = "./" + lib
     if a.mode == "crd":
         spec = doc["spec"]
