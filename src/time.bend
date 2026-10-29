@@ -113,3 +113,51 @@ def Wall.id(w: Wall) -> String:
   match w:
     case Wall{d, +s, +us}:
       U32.show(d) ++ Time.pad(s, 5n) ++ Time.pad(us, 6n)
+
+# Parsing
+# -------
+
+# Days since 1970-01-01 of a civil date (Howard Hinnant's days_from_civil),
+# for years from 1970.
+def Time.days.go(+y: U32, +m: U32, +d: U32, +mp: U32) -> U32:
+  ((y / 400) * 146097 + (y % 400) * 365 + (y % 400) / 4 - (y % 400) / 100 +
+    (153 * mp + 2) / 5 + d - 1 - 719468 : U32)
+
+def Time.days.early(+y: U32, +m: U32, +d: U32, early: Bool) -> U32:
+  match early:
+    case True{}:
+      Time.days.go((y - 1 : U32), m, d, (m + 9 : U32))
+    case False{}:
+      Time.days.go(y, m, d, (m - 3 : U32))
+
+def Time.days(+y: U32, +m: U32, +d: U32) -> U32:
+  Time.days.early(y, m, d, U32.is_le(m, 2))
+
+def Time.sub(s: String, i: Nat, n: Nat) -> String:
+  String.take(String.drop(s, i), n)
+
+def Time.parse.go(y: Maybe<&2, U32>, mo: Maybe<&2, U32>, d: Maybe<&2, U32>, h: Maybe<&2, U32>,
+  mi: Maybe<&2, U32>, se: Maybe<&2, U32>, ok: Bool) -> Maybe<&2, U32>:
+  match y mo d h mi se ok:
+    case Some{+y1} Some{+mo1} Some{+d1} Some{h1} Some{mi1} Some{se1} True{}:
+      Some{(Time.days(y1, mo1, d1) * 86400 + h1 * 3600 + mi1 * 60 + se1 : U32)}
+    case _ _ _ _ _ _ _:
+      None{}
+
+def Time.parse.seps(+s: String) -> Bool:
+  Bool.and(Bool.and(String.eq(Time.sub(s, 4n, 1n), "-"), String.eq(Time.sub(s, 7n, 1n), "-")),
+    Bool.and(Bool.and(String.eq(Time.sub(s, 10n, 1n), "T"), String.eq(Time.sub(s, 13n, 1n), ":")),
+      Bool.and(String.eq(Time.sub(s, 16n, 1n), ":"), String.ends_with(s, "Z"))))
+
+# Seconds since the epoch of "YYYY-MM-DDTHH:MM:SS[.fff]Z" (metav1.Time and
+# MicroTime; the fraction is dropped), or None.
+def Time.parse(+s: String) -> Maybe<&2, U32>:
+  Time.parse.go(U32.read(Time.sub(s, 0n, 4n)), U32.read(Time.sub(s, 5n, 2n)),
+    U32.read(Time.sub(s, 8n, 2n)), U32.read(Time.sub(s, 11n, 2n)), U32.read(Time.sub(s, 14n, 2n)),
+    U32.read(Time.sub(s, 17n, 2n)), Time.parse.seps(s))
+
+# Seconds since the epoch of a wall-clock reading.
+def Wall.secs(w: Wall) -> U32:
+  match w:
+    case Wall{d, s, us}:
+      (d * 86400 + s : U32)
