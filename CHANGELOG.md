@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/chenhunghan/bend-kube/compare/v0.1.1...v0.1.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* **gen:** import a BendHub package path given as --lib as is ([4b010b5](https://github.com/chenhunghan/bend-kube/commit/4b010b5913340e5f56dda5074141d7bd6ecd5bed))
+
 ## [0.1.1](https://github.com/chenhunghan/bend-kube/compare/v0.1.0...v0.1.1) (2026-10-29)
 
 
