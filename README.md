@@ -19,11 +19,11 @@ use, checking every file against its hash:
 <!-- x-release-please-start-version -->
 ```python
 import Base
-import bend-kube-runtime@0.1.1.0/src/json.bend as J
-import bend-kube-runtime@0.1.1.0/src/core.bend as C
-import bend-kube-runtime@0.1.1.0/src/config.bend as K
-import bend-kube-runtime@0.1.1.0/src/queue.bend as Q
-import bend-kube-runtime@0.1.1.0/src/kube.bend as Kb
+import bend-kube-runtime@0.1.2.0/src/json.bend as J
+import bend-kube-runtime@0.1.2.0/src/core.bend as C
+import bend-kube-runtime@0.1.2.0/src/config.bend as K
+import bend-kube-runtime@0.1.2.0/src/queue.bend as Q
+import bend-kube-runtime@0.1.2.0/src/kube.bend as Kb
 
 def reconcile(o: J.Json, cfg: K.Config) -> IO(Q.Action):
   # make the world match o, idempotently; then say when to look again
