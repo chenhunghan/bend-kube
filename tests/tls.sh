@@ -44,7 +44,9 @@ sym=$(command -v llvm-symbolizer || ls /usr/bin/llvm-symbolizer* 2>/dev/null | h
 [ -n "$sym" ] && export ASAN_SYMBOLIZER_PATH=$sym
 bend tests/fixtures/tls_probe.bend -o "$work/probe.c" > "$work/build.log" 2>&1 \
   || { cat "$work/build.log"; exit 1; }
-clang -std=c11 -O1 -g -fno-omit-frame-pointer -fsanitize="$SANITIZE" -fno-sanitize-recover=all \
+# -O0: when optimizing, Bend's runtime uses clang's preserve_none calling
+# convention, which LLVM cannot combine with ASan's stack frames on x86_64.
+clang -std=c11 -O0 -g -fno-omit-frame-pointer -fsanitize="$SANITIZE" -fno-sanitize-recover=all \
   "$work/probe.c" -lpthread -lm -o "$work/probe" > "$work/build.log" 2>&1 \
   || { grep -v "warning\|note:\|^ " "$work/build.log" | tail -20; exit 1; }
 pass "native probe with -fsanitize=$SANITIZE"
