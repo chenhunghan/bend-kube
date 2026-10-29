@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/chenhunghan/bend-kube/compare/v0.1.0...v0.1.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* publish to BendHub as bend-kube-runtime ([222c87a](https://github.com/chenhunghan/bend-kube/commit/222c87a5bed3488d146aeaa539a32194efe0f90e))
+
 ## 0.1.0 (2026-10-29)
 
 
