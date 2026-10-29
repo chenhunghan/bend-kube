@@ -33,16 +33,10 @@ jobs:
       BEND_NO_TELEMETRY: "1"
       VERSION: ${{ needs.release-please.outputs.version }}.0
     steps:
-      - name: Install tools
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl clang \
-            libclang-rt-dev llvm libssl3t64 openssl python3 perl
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-please.outputs.tag }}
-      - name: Install Bend
-        run: tools/install-bend.sh && echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup
       - name: Gates
         run: tools/ci.sh
       - name: Publish to BendHub

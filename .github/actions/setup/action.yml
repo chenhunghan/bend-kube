@@ -1,0 +1,29 @@
+# The tools tools/ci.sh needs, in a debian:trixie-slim job container: clang
+# with sanitizer runtimes, OpenSSL, the pinned Bend, and the Lean toolchain
+# `bend --verdict` builds its kernel with (cached with the built kernel).
+name: setup
+description: Install clang, OpenSSL, Bend and Lean for tools/ci.sh
+runs:
+  using: composite
+  steps:
+    - name: Install packages
+      shell: sh
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates curl git clang \
+          libclang-rt-dev llvm libssl3t64 openssl python3 perl zstd
+    - name: Cache Lean and the BendTT kernel
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.elan
+          ~/.bend/bendtt
+        key: lean-v4.34.0-bend-2.0.39-${{ runner.arch }}
+    - name: Install Bend and Lean
+      shell: sh
+      run: |
+        tools/install-bend.sh
+        [ -x "$HOME/.elan/bin/lean" ] || curl -sSfL https://raw.githubusercontent.com/leanprover/elan/v4.1.2/elan-init.sh \
+          | sh -s -- -y --no-modify-path --default-toolchain leanprover/lean4:v4.34.0
+        echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+        echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
