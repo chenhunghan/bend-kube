@@ -1,0 +1,5 @@
+# Reference checkouts of kube-rs and client-go, read alongside the code.
+/kube/
+/client-go/
+*.log
+.DS_Store

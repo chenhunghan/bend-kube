@@ -1,0 +1,103 @@
+# The Website operator (examples/website.bend): CRD in website-crd.yaml.
+# Two replicas behind a Lease in bend-kube-system; cluster-wide
+# least-privilege RBAC.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bend-kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bend-kube-website
+  namespace: bend-kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bend-kube-website
+rules:
+  - apiGroups: ["bend-kube.dev"]
+    resources: ["websites"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bend-kube.dev"]
+    resources: ["websites/status"]
+    verbs: ["patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bend-kube-website
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bend-kube-website
+subjects:
+  - kind: ServiceAccount
+    name: bend-kube-website
+    namespace: bend-kube-system
+---
+# Its own Lease, and nothing else, in its namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bend-kube-website-lease
+  namespace: bend-kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bend-kube-website-lease
+  namespace: bend-kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bend-kube-website-lease
+subjects:
+  - kind: ServiceAccount
+    name: bend-kube-website
+    namespace: bend-kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bend-kube-website
+  namespace: bend-kube-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: bend-kube-website}
+  template:
+    metadata:
+      labels: {app: bend-kube-website}
+    spec:
+      serviceAccountName: bend-kube-website
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: controller
+          image: bend-kube-website:dev
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8080}]
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+          readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}

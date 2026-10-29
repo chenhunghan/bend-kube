@@ -1,0 +1,9 @@
+list(tok) fails=0 wait=False | Init; InitApply a; InitApply b; 
+list(tok) fails=1 wait=True | 
+watch(10) fails=0 wait=False | InitApply c; InitDone; 
+watch(11) fails=0 wait=False | Apply a; 
+watch(15) fails=0 wait=False | 
+watch(15) fails=0 wait=False | 
+list() fails=0 wait=False | 
+watch(20) fails=0 wait=False | Init; InitApply a; InitDone; 
+store: ns/a

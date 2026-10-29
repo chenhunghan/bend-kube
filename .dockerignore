@@ -1,0 +1,3 @@
+kube
+client-go
+*.log

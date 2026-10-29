@@ -1,0 +1,61 @@
+# Releases follow release-please: each push to master updates a release
+# pull request from the conventional commits since the last release;
+# merging it tags vX.Y.Z, makes a GitHub release, and publishes the
+# package to BendHub as bend-kube@X.Y.Z.0 (the hub wants four numbers).
+# Publishing needs the BENDAI_KEY secret: the "key" from ~/.bend/bendai.json
+# after `bend login`.
+name: release
+on:
+  push:
+    branches: [master]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.rp.outputs.release_created }}
+      version: ${{ steps.rp.outputs.version }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    container: debian:trixie-slim
+    permissions:
+      contents: read
+    env:
+      BEND_NO_TELEMETRY: "1"
+      VERSION: ${{ needs.release-please.outputs.version }}.0
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl clang \
+            libclang-rt-dev llvm libssl3t64 openssl python3 perl
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - name: Install Bend
+        run: tools/install-bend.sh && echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - name: Gates
+        run: tools/ci.sh
+      - name: Publish to BendHub
+        env:
+          BENDAI_KEY: ${{ secrets.BENDAI_KEY }}
+        run: |
+          set -eu
+          if hash=$(curl -fs "https://hub.bend-lang.com/name/bend-kube@$VERSION"); then
+            echo "bend-kube@$VERSION is already published as $hash"; exit 0
+          fi
+          [ -n "$BENDAI_KEY" ] || { echo "the BENDAI_KEY secret is not set"; exit 1; }
+          umask 077; mkdir -p "$HOME/.bend"
+          printf '{"key":"%s","login":"ci"}\n' "$BENDAI_KEY" > "$HOME/.bend/bendai.json"
+          bend package.bend --publish "bend-kube@$VERSION"
+          rm -f "$HOME/.bend/bendai.json"
+          echo "import bend-kube@$VERSION/src/kube.bend as Kb" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,6 @@
+{"apiVersion":"v1","clusters":[{"cluster":{"certificate-authority-data":"QUJD","server":"https://127.0.0.1:6443"},"name":"local"}],"contexts":[{"context":{"cluster":"local","namespace":"team-a","user":"user"},"name":"dev"}],"current-context":"dev","kind":"Config","preferences":{},"users":[{"name":"user","user":{"exec":{"apiVersion":"client.authentication.k8s.io/v1","args":["eks","get-token"],"command":"aws","env":[{"name":"AWS_PROFILE","value":"prod"}],"provideClusterInfo":false},"token":null}}]}
+{"a":{"b":["x","it's"],"c":"q#not comment"},"d":true}
+{"context":{"cluster":"local","user":"me"},"args":["a","it's","q",true,null],"empty":{},"nested":{"a":[1,{"b":"c"}]}}
+{"ca":"-----BEGIN-----\nabc\n\ndef\n-----END-----\n","note":"folded text\npara","keep":"x\n\n","items":["one\ntwo\n","plain"],"after":"done"}
+{"base":{"image":"nginx","port":80},"name":"web","svc":{"port":8080,"owner":"web","image":"nginx"},"list":[{"a":1},{"a":1},null,"123","plain"]}
+[{"a":1},{"b":[2]}]

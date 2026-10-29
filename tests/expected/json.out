@@ -1,0 +1,10 @@
+ok {"a":[1,2.5e3,-3],"b":{"c":null,"d":true},"e":"x\"yA\n"}
+ok []
+ok {}
+ok 42
+err unexpected ]
+err expected :
+err expected , or a closer
+err bad literal
+err unexpected end of input
+deep

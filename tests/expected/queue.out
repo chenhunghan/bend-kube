@@ -1,0 +1,14 @@
+pop a
+pop none
+a running: True
+a waiting while running: False
+timer a gen 5 after 1000ms
+a queued again after done (dirty): True
+pop b
+timer b gen 2 after 5ms
+no timer (a was not running)
+pop a
+timer a gen 6 after 5ms
+stale wake queues a: False
+current wake queues a: True
+backoff: 5 10 20 1000000

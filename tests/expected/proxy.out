@@ -1,0 +1,57 @@
+== routes
+direct
+direct
+via proxy.corp:3128 auth=
+direct
+direct
+direct
+direct
+via proxy.corp:3128 auth=
+== no_proxy
+direct
+direct
+direct
+via proxy.corp:3128 auth=
+via proxy.corp:3128 auth=
+direct
+direct
+direct
+via proxy.corp:3128 auth=
+direct
+direct
+direct
+via proxy.corp:3128 auth=
+direct
+via proxy.corp:3128 auth=
+direct
+direct
+== urls
+via proxy:8080 auth=
+via proxy:80 auth=
+via proxy:1 auth=
+via fd00::9:3128 auth=dXNlcjpzM2NyZXQ=
+via proxy:3128 auth=dXNAZXI6cDpzcw==
+via proxy:3128 auth=YUBiOmM=
+via proxy:3128 auth=dToxMDAl
+error: HTTPS_PROXY: only http:// proxies are supported
+error: HTTPS_PROXY: only http:// proxies are supported
+error: HTTPS_PROXY names no host
+== connect
+CONNECT api.corp:6443 HTTP/1.1
+Host: api.corp:6443
+
+
+CONNECT [fd00::1]:443 HTTP/1.1
+Host: [fd00::1]:443
+Proxy-Authorization: Basic dTpw
+
+
+== tunnel
+open
+open
+more
+fail: proxy refused CONNECT: HTTP/1.1 407 Proxy Authentication Required
+fail: proxy sent bytes before the TLS handshake
+fail: proxy closed the connection before answering CONNECT
+fail: proxy refused CONNECT: SSH-2.0-OpenSSH
+fail: proxy answer too long

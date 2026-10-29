@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    container: debian:trixie-slim
+    env:
+      BEND_NO_TELEMETRY: "1"
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl clang \
+            libclang-rt-dev llvm libssl3t64 openssl python3 perl
+      - uses: actions/checkout@v4
+      - name: Install Bend
+        run: tools/install-bend.sh && echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - name: Gates
+        run: tools/ci.sh
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the proof-gated controller image
+        run: docker build -t bend-kube-mirror .

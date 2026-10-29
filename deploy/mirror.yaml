@@ -1,0 +1,86 @@
+# The ConfigMap mirror (examples/mirror.bend), two replicas behind a Lease.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bend-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bend-kube-mirror
+  namespace: bend-demo
+---
+# Least privilege: the ConfigMaps it mirrors and its own Lease.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bend-kube-mirror
+  namespace: bend-demo
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bend-kube-mirror
+  namespace: bend-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bend-kube-mirror
+subjects:
+  - kind: ServiceAccount
+    name: bend-kube-mirror
+    namespace: bend-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bend-kube-mirror
+  namespace: bend-demo
+  labels:
+    app: bend-kube-mirror
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bend-kube-mirror
+  template:
+    metadata:
+      labels:
+        app: bend-kube-mirror
+    spec:
+      serviceAccountName: bend-kube-mirror
+      # SIGTERM releases the Lease; give it time to.
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: bend-kube-mirror:dev3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
