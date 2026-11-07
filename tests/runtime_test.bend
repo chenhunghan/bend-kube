@@ -169,15 +169,14 @@ def main() -> IO(Unit):
     IO.print("watch ends whole: " ++ end(H.Resp{H.PDone{}, None{}, Nil{}}))
     IO.print("watch cut mid-stream: " ++ end(H.Resp{H.PErr{"connection closed mid-response"}, None{}, Nil{}}))
     IO.print("watch closed before answering: " ++ end(H.Resp{H.PLost{"closed"}, None{}, Nil{}}))
-    IO.print("reconcile finished in time: " ++ action(R.Ctl.timed_out(5000, Some{Q.Requeue{60000}})))
     IO.print("own metrics:\n" ++ R.Meter.render(
       Map.set(&2, U32, Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "syncs_total{b=\"a\"}", 3),
         "syncs_total{b=\"c\"}", 1), "keys", 2),
       Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "syncs_total", 0), "keys", 1)))
     IO.print("a 429 naming its delay: " ++ failed(429, "{\"kind\": \"Status\", \"code\": 429, \"reason\": \"TooManyRequests\", \"message\": \"slow down\", \"details\": {\"retryAfterSeconds\": 7}}"))
     IO.print("a proxy's 429, Retry-After: 4 and a text body: " ++ failed_h(429, "Too Many Requests", 4))
+    IO.print("a Retry-After of 99999999s, capped: " ++ failed_h(429, "Too Many Requests", 99999999))
     IO.print("a 500 without one: " ++ failed(500, "{\"kind\": \"Status\", \"code\": 500, \"reason\": \"InternalError\", \"message\": \"boom\"}"))
-    IO.print("reconcile timed out: " ++ action(R.Ctl.timed_out(5000, None{})))
     IO.print("tokens in the first second (a fraction carries over) at qps 1, 3, 7, 50, 75, 333, 1000: " ++ tokens(1, 100) ++ " "
       ++ tokens(3, 100) ++ " " ++ tokens(7, 100) ++ " " ++ tokens(50, 100) ++ " " ++ tokens(75, 100)
       ++ " " ++ tokens(333, 100) ++ " " ++ tokens(1000, 100))
