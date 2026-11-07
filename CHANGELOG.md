@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/chenhunghan/bend-kube/compare/v0.4.0...v0.5.0) (2026-11-07)
+
+
+### Features
+
+* validate election timing; read the Retry-After header ([#9](https://github.com/chenhunghan/bend-kube/issues/9)) ([75b8d4d](https://github.com/chenhunghan/bend-kube/commit/75b8d4d279a22affb052c2388826fa68776f6115))
+
 ## [0.4.0](https://github.com/chenhunghan/bend-kube/compare/v0.3.0...v0.4.0) (2026-11-07)
 
 
