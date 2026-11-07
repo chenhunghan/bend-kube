@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/chenhunghan/bend-kube/compare/v0.3.0...v0.4.0) (2026-11-07)
+
+
+### Features
+
+* controller metrics and Retry-After ([#7](https://github.com/chenhunghan/bend-kube/issues/7)) ([4891a4f](https://github.com/chenhunghan/bend-kube/commit/4891a4f7f83a87181657ce955bb37b715cdd1574))
+
 ## [0.3.0](https://github.com/chenhunghan/bend-kube/compare/v0.2.0...v0.3.0) (2026-11-07)
 
 
