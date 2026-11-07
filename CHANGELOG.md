@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/chenhunghan/bend-kube/compare/v0.5.0...v0.5.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* cap Retry-After at 1000s; drop the unused timeout mapping ([#11](https://github.com/chenhunghan/bend-kube/issues/11)) ([483175d](https://github.com/chenhunghan/bend-kube/commit/483175d2a9292824f8693c82062ddfecd2aafd4e))
+
 ## [0.5.0](https://github.com/chenhunghan/bend-kube/compare/v0.4.0...v0.5.0) (2026-11-07)
 
 
