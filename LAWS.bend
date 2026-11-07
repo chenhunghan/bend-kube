@@ -8,6 +8,9 @@ import ./src/finalizer.bend as F
 import ./src/http.bend as H
 import ./src/utf8.bend as U
 import ./src/proxy.bend as P
+import ./src/lease.bend as E
+import ./src/control.bend as X
+import ./src/cond.bend as Co
 
 # LAWS
 # ====
@@ -209,6 +212,20 @@ law fin_cleanup_tests:
   for i: U32
   {F.Fin.state.go(fs, name, Some{i}, True{}) == F.FCleanup{F.Fin.remove_patch(i, name)} : F.FState}
 
+# A cleanup that failed, or that holds (waiting on something outside),
+# keeps the finalizer, so the object is not deleted before cleanup is done.
+law fin_failed_cleanup_keeps:
+  for m: String
+  {F.Fin.keeps(Q.Retry{m}) == True{} : Bool}
+
+law fin_held_cleanup_keeps:
+  for ms: U32
+  {F.Fin.keeps(Q.Hold{ms}) == True{} : Bool}
+
+# A finished cleanup lets the finalizer go.
+law fin_done_cleanup_releases:
+  {F.Fin.keeps(Q.AwaitChange{}) == False{} : Bool}
+
 # HTTP (the keep-alive pool's retry rule)
 # ---------------------------------------
 
@@ -302,3 +319,192 @@ law tunnel_end_before_answer:
   for h: List<&2, U32>
   {P.Tunnel.feed(P.TMore{h}, Nil{})
     == P.TFail{"proxy closed the connection before answering CONNECT"} : P.Tunnel}
+
+# Controllers (kube-runtime's predicates and trigger mappers)
+# ----------------------------------------------------------
+
+# An object with a generation, a version, a deletion stamp and a status,
+# for the laws below.
+def Ex.obj(gen: J.Json, rv: String, del: J.Json, st: J.Json) -> J.Json:
+  J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"w"}},
+    J.KV{"namespace", J.JStr{"default"}}, J.KV{"generation", gen},
+    J.KV{"resourceVersion", J.JStr{rv}}, J.KV{"deletionTimestamp", del}])}, J.KV{"status", st}])
+
+# Without predicates, every change reconciles.
+law filter_none_passes:
+  for old: Maybe<&2, J.Json>
+  for new: J.Json
+  {X.Pred.passes(Nil{}, old, new) == True{} : Bool}
+
+# With predicates, an object the cache has not seen always reconciles.
+law filter_uncached_passes:
+  for p: X.Pred
+  for ps: List<&2, X.Pred>
+  for new: J.Json
+  {X.Pred.passes(p <> ps, None{}, new) == True{} : Bool}
+
+# Under the generation predicate, a change that leaves the generation alone
+# (a status write, whatever its version) does not reconcile: a controller's
+# own status updates do not wake it.
+law filter_same_generation_skips:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNum{"3"}, r1, J.JNull{}, a)},
+    Ex.obj(J.JNum{"3"}, r2, J.JNull{}, b)) == False{} : Bool}
+
+# A new generation (a spec change) reconciles.
+law filter_generation_passes:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNum{"3"}, r1, J.JNull{}, a)},
+    Ex.obj(J.JNum{"4"}, r2, J.JNull{}, b)) == True{} : Bool}
+
+# The start of a deletion reconciles, whatever the predicates, so a
+# finalizer is never missed.
+law filter_deletion_passes:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  for t: String
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNum{"3"}, r1, J.JNull{}, a)},
+    Ex.obj(J.JNum{"3"}, r2, J.JStr{t}, b)) == True{} : Bool}
+
+# An object without a generation (a ConfigMap) reconciles on every change.
+law filter_no_generation_passes:
+  for a: J.Json
+  for b: J.Json
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNull{}, "1", J.JNull{}, a)},
+    Ex.obj(J.JNull{}, "2", J.JNull{}, b)) == True{} : Bool}
+
+# Without predicates, an applied primary is cached and reconciles.
+law fold_apply_triggers:
+  for x: J.Json
+  for s: S.Store
+  for ks: List<&2, String>
+  for g: List<&2, String>
+  {X.Fold.prim(Nil{}, [W.OApply{x}], X.Fold{s, ks, g})
+    == X.Fold{S.Store.apply(s, W.OApply{x}), C.Obj.key(x) <> ks, g} : X.Fold}
+
+# A deleted primary leaves the cache, reconciles nothing, and is forgotten.
+law fold_delete_forgets:
+  for ps: List<&2, X.Pred>
+  for x: J.Json
+  for s: S.Store
+  for ks: List<&2, String>
+  for g: List<&2, String>
+  {X.Fold.prim(ps, [W.ODelete{x}], X.Fold{s, ks, g})
+    == X.Fold{S.Store.apply(s, W.ODelete{x}), ks, C.Obj.key(x) <> g} : X.Fold}
+
+# An owned object reconciles the owner it names of the primary's kind and
+# API group, in its own namespace (kube-runtime's trigger_owners).
+law owner_triggers_owner:
+  for prim: S.Store
+  {X.Rel.keys(X.ROwner{}, C.Res{"bend-kube.dev", "v1alpha1", "Website", "websites", True{}},
+    J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"w-web"}},
+      J.KV{"namespace", J.JStr{"default"}},
+      J.KV{"ownerReferences", J.Json.arr([J.Json.obj([
+        J.KV{"apiVersion", J.JStr{"bend-kube.dev/v1alpha1"}}, J.KV{"kind", J.JStr{"Website"}},
+        J.KV{"name", J.JStr{"w"}}])])}])}]), prim)
+    == ["default/w"] : List<&2, String>}
+
+# A cluster-scoped primary is named by its owned objects without their
+# namespace, so a namespaced child reconciles it.
+law owner_triggers_cluster_owner:
+  for prim: S.Store
+  {X.Rel.keys(X.ROwner{}, C.Res{"bend-kube.dev", "v1", "Tenant", "tenants", False{}},
+    J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"quota"}},
+      J.KV{"namespace", J.JStr{"team-a"}},
+      J.KV{"ownerReferences", J.Json.arr([J.Json.obj([
+        J.KV{"apiVersion", J.JStr{"bend-kube.dev/v1"}}, J.KV{"kind", J.JStr{"Tenant"}},
+        J.KV{"name", J.JStr{"a"}}])])}])}]), prim)
+    == ["a"] : List<&2, String>}
+
+# An owner of the same kind in another API group is not the primary.
+law owner_needs_group:
+  for prim: S.Store
+  {X.Rel.keys(X.ROwner{}, C.Res{"bend-kube.dev", "v1alpha1", "Website", "websites", True{}},
+    J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"w-web"}},
+      J.KV{"namespace", J.JStr{"default"}},
+      J.KV{"ownerReferences", J.Json.arr([J.Json.obj([
+        J.KV{"apiVersion", J.JStr{"other.io/v1"}}, J.KV{"kind", J.JStr{"Website"}},
+        J.KV{"name", J.JStr{"w"}}])])}])}]), prim)
+    == Nil{} : List<&2, String>}
+
+# Under any predicate, a change of finalizers (one added, as a finalizer
+# helper does before waiting for the change) reconciles.
+law filter_finalizer_passes:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  for f: String
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNum{"3"}, r1, J.JNull{}, a)},
+    J.Json.set(Ex.obj(J.JNum{"3"}, r2, J.JNull{}, b), "metadata",
+      J.Json.set(J.Json.get(Ex.obj(J.JNum{"3"}, r2, J.JNull{}, b), "metadata"), "finalizers",
+        J.Json.arr([J.JStr{f}])))) == True{} : Bool}
+
+# Leader election (client-go's leaderelection)
+# --------------------------------------------
+
+# A Lease held by "a", as another replica reads it.
+def Ex.lease(+holder: String) -> J.Json:
+  J.Json.obj([J.KV{"spec", J.Json.obj([J.KV{"holderIdentity", J.JStr{holder}},
+    J.KV{"renewTime", J.JStr{"r"}}])}])
+
+# Another holder's lease, last seen changing 1s ago (15s duration), is live:
+# we wait.
+law lease_live_is_held:
+  {E.Lease.held(Ex.lease("a"), "b", E.Obs{"a", "r", 100000}, 101000, 15) == True{} : Bool}
+
+# Our clock stepping back 1s does not make it expire.
+law lease_clock_step_is_held:
+  {E.Lease.held(Ex.lease("a"), "b", E.Obs{"a", "r", 100000}, 99000, 15) == True{} : Bool}
+
+# Seen unchanged for longer than its duration, it has expired: we may take it.
+law lease_expired_is_taken:
+  {E.Lease.held(Ex.lease("a"), "b", E.Obs{"a", "r", 100000}, 115001, 15) == False{} : Bool}
+
+# Our own lease is never held against us: we renew it.
+law lease_ours_renews:
+  for at: U32
+  for now: U32
+  {E.Lease.held(Ex.lease("b"), "b", E.Obs{"b", "r", at}, now, 15) == False{} : Bool}
+
+# A released lease (no holder) is free at once.
+law lease_released_is_free:
+  for at: U32
+  for now: U32
+  {E.Lease.held(Ex.lease(""), "b", E.Obs{"", "r", at}, now, 15) == False{} : Bool}
+
+# Conditions (apimachinery's meta.SetStatusCondition)
+# ---------------------------------------------------
+
+# Setting a condition whose status is unchanged keeps its transition time.
+law cond_same_status_keeps_time:
+  for r1: String
+  for m1: String
+  for t0: String
+  for r2: String
+  for m2: String
+  for g: String
+  for now: String
+  {Co.Cond.get(Co.Cond.set([Co.Cond.make("Ready", "True", r1, m1, "1", t0)],
+    Co.Cond.make("Ready", "True", r2, m2, "2", now)), "Ready")
+    == Some{Co.Cond.make("Ready", "True", r2, m2, "2", t0)} : Maybe<&2, J.Json>}
+
+# A changed status takes the new transition time.
+law cond_new_status_moves_time:
+  for r1: String
+  for m1: String
+  for t0: String
+  for r2: String
+  for m2: String
+  for now: String
+  {Co.Cond.get(Co.Cond.set([Co.Cond.make("Ready", "False", r1, m1, "1", t0)],
+    Co.Cond.make("Ready", "True", r2, m2, "2", now)), "Ready")
+    == Some{Co.Cond.make("Ready", "True", r2, m2, "2", now)} : Maybe<&2, J.Json>}

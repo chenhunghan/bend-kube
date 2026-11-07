@@ -14,7 +14,7 @@
 # older SDK (for example .../MacOSX26.5.sdk).
 set -eu
 cd "$(dirname "$0")/.."
-need_bend=2.0.39
+need_bend=2.0.40
 have=$(bend version 2>&1 | tr -d '\n')
 case "$have" in *"$need_bend"*) ;; *) echo "bend $need_bend required (have: $have)"; exit 1;; esac
 
@@ -27,7 +27,7 @@ out=$(bend PROOF.bend --verdict 2>&1) || true; echo "$out" | tail -1
 echo "$out" | grep -q "ALL PROOFS CHECK" || { echo "$out"; exit 1; }
 
 step "pure modules"
-for m in json utf8 base64 yaml http ws core config proxy watcher store queue lease time finalizer typed; do
+for m in json utf8 base64 yaml http ws core config proxy watcher store queue control cond lease time finalizer typed; do
   out=$(bend src/$m.bend --check-only 2>&1) || true
   if echo "$out" | grep -q "ALL PROOFS CHECK"; then echo "ok   $m"; else echo "FAIL $m"; echo "$out"; exit 1; fi
 done

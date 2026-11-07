@@ -1,0 +1,38 @@
+name: e2e
+# tests/e2e.sh against a disposable kind cluster: the typed operator,
+# finalizers, shared watches, cached reads and references, the rate limit,
+# and draining on SIGTERM, all on a real API server.
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  kind:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BEND_NO_TELEMETRY: "1"
+      KIND_VERSION: v0.29.0
+      KUBECTL_VERSION: v1.33.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang, OpenSSL and Bend
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang openssl libssl3t64 python3
+          tools/install-bend.sh
+          echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - name: Install kind and kubectl
+        run: |
+          curl -fsSLo kind "https://kind.sigs.k8s.io/dl/$KIND_VERSION/kind-linux-amd64"
+          curl -fsSLo kubectl "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+          sudo install -m 0755 kind kubectl /usr/local/bin/
+      - name: Create the cluster
+        run: kind create cluster --name bend-e2e --wait 120s
+      - name: End-to-end tests
+        run: |
+          kind get kubeconfig --name bend-e2e > "$RUNNER_TEMP/kind.yaml"
+          KUBECONFIG="$RUNNER_TEMP/kind.yaml" tests/e2e.sh

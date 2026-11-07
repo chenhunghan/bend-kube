@@ -58,28 +58,32 @@ def Serve.path.go(parts: List<&2, String>) -> String:
 def Serve.path(req: String) -> String:
   Serve.path.go(String.split(String.trim(Serve.first_line(req)), ' '))
 
-def Serve.probe.answer(m: Poll<&1, &1, Maybe<&1, List<&2, R.Snap>>, Unit>) -> List<&2, R.Snap>:
+def Serve.probe.answer(m: Poll<&1, &1, Maybe<&1, List<&2, R.Snap>>, Unit>) ->
+  Maybe<&2, List<&2, R.Snap>>:
   match m:
     case Ready{Some{x}}:
-      x
+      Some{x}
     case _:
-      Nil{}
+      None{}
 
-# Every controller's snapshot from the status keeper, which answers at once
-# (none on a standby replica).
-def Serve.probe(+status: Chan(R.SMsg)) -> IO(List<&2, R.Snap>):
-  IO.bind(Chan(List<&2, R.Snap>), List<&2, R.Snap>, Chan.new(List<&2, R.Snap>, 1),
-    +c => IO.bind(Result<&1, &1, R.SMsg, Unit>, List<&2, R.Snap>,
-      Chan.send(R.SMsg, status, R.SGet{c}),
-      u => IO.bind(Poll<&1, &1, Maybe<&1, List<&2, R.Snap>>, Unit>, List<&2, R.Snap>,
-        Chan.try_recv(List<&2, R.Snap>, c, 500),
-        m => IO.pure(List<&2, R.Snap>, Serve.probe.answer(m)))))
+# Every controller's snapshot from the status keeper (none on a standby
+# replica), or None if the keeper did not answer within 2s.
+def Serve.probe(+status: Chan(R.SMsg)) -> IO(Maybe<&2, List<&2, R.Snap>>):
+  IO.bind(Chan(List<&2, R.Snap>), Maybe<&2, List<&2, R.Snap>>, Chan.new(List<&2, R.Snap>, 1),
+    +c => IO.bind(Poll<&1, &1, Result<&1, &1, R.SMsg, Unit>, R.SMsg>, Maybe<&2, List<&2, R.Snap>>,
+      Chan.try_send(R.SMsg, status, R.SGet{c}, 1000),
+      u => IO.bind(Poll<&1, &1, Maybe<&1, List<&2, R.Snap>>, Unit>, Maybe<&2, List<&2, R.Snap>>,
+        Chan.try_recv(List<&2, R.Snap>, c, 2000),
+        m => IO.pure(Maybe<&2, List<&2, R.Snap>>, Serve.probe.answer(m)))))
+
+def Serve.unavailable() -> String:
+  Serve.reply(503, "text/plain", "status unavailable\n")
 
 def Serve.all_ready(ss: List<&2, R.Snap>) -> Bool:
   match ss:
     case Nil{}:
       True{}
-    case Con{R.Snap{nm, r, a, b, c, d, e}, t}:
+    case Con{R.Snap{nm, r, a, b, c, d, e, q, h, sm, cz}, t}:
       Bool.and(r, Serve.all_ready(t))
 
 def Serve.ready.go(standby: Bool, ready: Bool) -> String:
@@ -107,35 +111,70 @@ def Serve.head(+name: String, kind: String, help: String) -> String:
 
 def Serve.snap.name(s: R.Snap) -> String:
   match s:
-    case R.Snap{n, r, a, b, c, d, e}:
+    case R.Snap{n, r, a, b, c, d, e, q, h, sm, cz}:
       n
 
-def Serve.snap.pick.go(r: Bool, +a: U32, +b: U32, +c: U32, +d: U32, +e: U32, i0: Bool, i1: Bool,
-  i2: Bool, i3: Bool, i4: Bool) -> String:
-  match i0 i1 i2 i3 i4:
-    case True{} _ _ _ _:
-      Serve.bool(r)
-    case False{} True{} _ _ _:
-      U32.show(a)
-    case False{} False{} True{} _ _:
-      U32.show(b)
-    case False{} False{} False{} True{} _:
-      U32.show(c)
-    case False{} False{} False{} False{} True{}:
-      U32.show(d)
-    case _ _ _ _ _:
-      U32.show(e)
-
-def Serve.snap.pick(+i: U32, r: Bool, +a: U32, +b: U32, +c: U32, +d: U32, +e: U32) -> String:
-  Serve.snap.pick.go(r, a, b, c, d, e, U32.is_eq(i, 0), U32.is_eq(i, 1), U32.is_eq(i, 2),
-    U32.is_eq(i, 3), U32.is_eq(i, 4))
+def Serve.nth(xs: List<&2, String>, n: Nat) -> String:
+  match xs n:
+    case Nil{} k:
+      "0"
+    case Con{x, t} 0n:
+      x
+    case Con{x, t} 1n+k:
+      Serve.nth(t, k)
 
 # The field-th number of a snapshot (0 ready, 1 reconciles, 2 errors,
-# 3 events, 4 running, 5 objects).
+# 3 events, 4 running, 5 objects, 6 queued).
 def Serve.snap.field(s: R.Snap, +i: U32) -> String:
   match s:
-    case R.Snap{n, r, +a, +b, +c, +d, +e}:
-      Serve.snap.pick(i, r, a, b, c, d, e)
+    case R.Snap{n, r, a, b, c, d, e, q, h, sm, cz}:
+      Serve.nth([Serve.bool(r), U32.show(a), U32.show(b), U32.show(c), U32.show(d), U32.show(e),
+        U32.show(q)], U32.to_nat(i))
+
+# Reconcile durations as a Prometheus histogram: cumulative buckets in
+# seconds, the sum and the count.
+def Serve.les() -> List<&2, String>:
+  ["0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "+Inf"]
+
+def Serve.buckets(+name: String, +ctl: String, les: List<&2, String>, cs: List<&2, U32>,
+  +acc: U32) -> String:
+  match les cs:
+    case Con{le, lt} Con{+c, ct}:
+      name ++ "_bucket{controller=\"" ++ ctl ++ "\",le=\"" ++ le ++ "\"} " ++ U32.show((acc + c : U32))
+        ++ "\n" ++ Serve.buckets(name, ctl, lt, ct, (acc + c : U32))
+    case _ _:
+      name ++ "_count{controller=\"" ++ ctl ++ "\"} " ++ U32.show(acc) ++ "\n"
+
+def Serve.pad3(+n: U32) -> String:
+  String.drop(U32.show((n + 1000 : U32)), 1n)
+
+def Serve.secs(x: R.Sum) -> String:
+  match x:
+    case R.Sum{s, +m}:
+      U32.show(s) ++ "." ++ Serve.pad3(m)
+
+def Serve.cache.go(+ctl: String, cz: List<&2, U32>, +i: U32) -> String:
+  match cz:
+    case Nil{}:
+      ""
+    case Con{c, t}:
+      "bendkube_cache_objects{controller=\"" ++ ctl ++ "\",cache=\"" ++ U32.show(i) ++ "\"} "
+        ++ U32.show(c) ++ "\n" ++ Serve.cache.go(ctl, t, (i + 1 : U32))
+
+def Serve.caches(ss: List<&2, R.Snap>) -> String:
+  match ss:
+    case Nil{}:
+      ""
+    case Con{R.Snap{n, r, a, b, c, d, e, q, h, sm, cz}, t}:
+      Serve.cache.go(n, cz, 1) ++ Serve.caches(t)
+
+def Serve.hist(ss: List<&2, R.Snap>, +name: String) -> String:
+  match ss:
+    case Nil{}:
+      ""
+    case Con{R.Snap{+n, r, a, b, c, d, e, q, h, sm, cz}, t}:
+      Serve.buckets(name, n, Serve.les(), h, 0)
+        ++ name ++ "_sum{controller=\"" ++ n ++ "\"} " ++ Serve.secs(sm) ++ "\n" ++ Serve.hist(t, name)
 
 # One sample per controller, labeled with its kind.
 def Serve.samples(ss: List<&2, R.Snap>, +name: String, +field: U32) -> String:
@@ -159,10 +198,24 @@ def Serve.text(+ss: List<&2, R.Snap>) -> String:
     ++ Serve.family(ss, "bendkube_watch_events_total", "counter", "Watcher outputs received.", 3)
     ++ Serve.family(ss, "bendkube_reconcile_running", "gauge", "Reconciles running now.", 4)
     ++ Serve.family(ss, "bendkube_store_objects", "gauge", "Objects in the primary store.", 5)
-    ++ Serve.family(ss, "bendkube_store_ready", "gauge", "Whether the primary store has listed.", 0)
+    ++ Serve.family(ss, "bendkube_store_ready", "gauge", "Whether every cache has listed.", 0)
+    ++ Serve.family(ss, "bendkube_queue_depth", "gauge", "Keys waiting to reconcile.", 6)
+    ++ Serve.head("bendkube_cache_objects", "gauge", "Objects in each related watch's cache, by its number.")
+    ++ Serve.caches(ss)
+    ++ Serve.head("bendkube_reconcile_duration_seconds", "histogram", "How long reconciles take.")
+    ++ Serve.hist(ss, "bendkube_reconcile_duration_seconds")
 
 def Serve.metrics(+ss: List<&2, R.Snap>) -> String:
   Serve.reply(200, "text/plain; version=0.0.4", Serve.text(ss))
+
+def Serve.or_unavailable(m: Maybe<&2, List<&2, R.Snap>>, metrics: Bool) -> String:
+  match m metrics:
+    case Some{+ss} True{}:
+      Serve.metrics(ss)
+    case Some{+ss} False{}:
+      Serve.ready(ss)
+    case None{} _:
+      Serve.unavailable()
 
 # The answer to a request.
 def Serve.route(path: String, +status: Chan(R.SMsg)) -> IO(String):
@@ -170,9 +223,11 @@ def Serve.route(path: String, +status: Chan(R.SMsg)) -> IO(String):
     case "/healthz":
       IO.pure(String, Serve.reply(200, "text/plain", "ok\n"))
     case "/readyz":
-      IO.bind(List<&2, R.Snap>, String, Serve.probe(status), m => IO.pure(String, Serve.ready(m)))
+      IO.bind(Maybe<&2, List<&2, R.Snap>>, String, Serve.probe(status),
+        m => IO.pure(String, Serve.or_unavailable(m, False{})))
     case "/metrics":
-      IO.bind(List<&2, R.Snap>, String, Serve.probe(status), m => IO.pure(String, Serve.metrics(m)))
+      IO.bind(Maybe<&2, List<&2, R.Snap>>, String, Serve.probe(status),
+        m => IO.pure(String, Serve.or_unavailable(m, True{})))
     case _:
       IO.pure(String, Serve.reply(404, "text/plain", "not found\n"))
 
@@ -214,22 +269,26 @@ def AEv.got(p: Listener & Serve.Res(Socket)) -> AEv:
       AGot{l, r}
 
 # Accepts forever (fuel permitting), serving each connection on its own.
-def Serve.loop(fuel: Nat, ev: AEv, +status: Chan(R.SMsg)) -> IO(Unit):
-  match fuel ev:
-    case 0n AGot{l, r}:
+def Serve.loop(outer: Nat, fuel: Nat, ev: AEv, +status: Chan(R.SMsg)) -> IO(Unit):
+  match outer fuel ev:
+    case 0n 0n AGot{l, r}:
       Listener.close(l)
-    case 1n+f AGot{l, r}:
+    case 1n+o 0n e:
+      Serve.loop(o, 4294967295n, e, status)
+    case o 1n+f AGot{l, r}:
       IO.bind(Unit, Unit, Serve.accepted(r, status),
         u => IO.bind(Listener & Serve.Res(Socket), Unit, TCP.accept(l),
-          p => Serve.loop(f, AEv.got(p), status)))
+          p => Serve.loop(o, f, AEv.got(p), status)))
 
 def Serve.listening(r: Serve.Res(Listener), +status: Chan(R.SMsg)) -> IO(Unit):
   match r:
     case Done{l}:
       IO.bind(Listener & Serve.Res(Socket), Unit, TCP.accept(l),
-        p => Serve.loop(4294967295n, AEv.got(p), status))
+        p => Serve.loop(4294967295n, 4294967295n, AEv.got(p), status))
     case Fail{(c, m)}:
-      IO.print_err("health server: " ++ m)
+      # probes and metrics are part of the contract with the kubelet: a
+      # port that cannot be bound is fatal (as in controller-runtime)
+      IO.die(Unit, 1, "bend-kube: health server cannot listen: " ++ m)
 
 # Serves the endpoints on 0.0.0.0:port.
 def Serve.run(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):

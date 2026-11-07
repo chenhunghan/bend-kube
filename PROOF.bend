@@ -140,3 +140,69 @@ def Laws.tunnel_rejects_early_bytes(b, bs):
 
 def Laws.tunnel_end_before_answer(h):
   {==}
+
+def Laws.filter_none_passes(old, new):
+  {==}
+
+def Laws.filter_uncached_passes(p, ps, new):
+  {==}
+
+def Laws.filter_same_generation_skips(r1, r2, a, b):
+  {==}
+
+def Laws.filter_generation_passes(r1, r2, a, b):
+  {==}
+
+def Laws.filter_deletion_passes(r1, r2, a, b, t):
+  {==}
+
+def Laws.filter_no_generation_passes(a, b):
+  {==}
+
+def Laws.fold_apply_triggers(x, s, ks, g):
+  {==}
+
+def Laws.fold_delete_forgets(ps, x, s, ks, g):
+  {==}
+
+def Laws.owner_triggers_owner(prim):
+  {==}
+
+def Laws.owner_triggers_cluster_owner(prim):
+  {==}
+
+def Laws.owner_needs_group(prim):
+  {==}
+
+def Laws.filter_finalizer_passes(r1, r2, a, b, f):
+  {==}
+
+def Laws.cond_same_status_keeps_time(r1, m1, t0, r2, m2, g, now):
+  {==}
+
+def Laws.cond_new_status_moves_time(r1, m1, t0, r2, m2, now):
+  {==}
+
+def Laws.lease_live_is_held():
+  {==}
+
+def Laws.lease_clock_step_is_held():
+  {==}
+
+def Laws.lease_expired_is_taken():
+  {==}
+
+def Laws.lease_ours_renews(at, now):
+  {==}
+
+def Laws.lease_released_is_free(at, now):
+  {==}
+
+def Laws.fin_failed_cleanup_keeps(m):
+  {==}
+
+def Laws.fin_held_cleanup_keeps(ms):
+  {==}
+
+def Laws.fin_done_cleanup_releases():
+  {==}

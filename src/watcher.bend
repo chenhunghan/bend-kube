@@ -68,8 +68,9 @@ def Backoff.delay.go(+fails: U32, capped: Bool) -> U32:
 
 # The delay before the next try after fails failures: 800ms doubling, at
 # most 30s. The driver adds jitter.
+# (A count of 0, which no failure leaves, waits as 1 does.)
 def Backoff.delay(+fails: U32) -> U32:
-  Backoff.delay.go(fails, U32.is_ge(fails, 6))
+  Backoff.delay.go(U32.max(fails, 1), U32.is_ge(fails, 6))
 
 # Steps
 # -----

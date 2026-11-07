@@ -51,7 +51,11 @@ parentPort.once("message", ({ port: p }) => {
       plain.setTimeout(0);
       const opts = { socket: plain, rejectUnauthorized: true, minVersion: "TLSv1.2",
         ALPNProtocols: ["http/1.1"] };
+      // the name the certificate must carry, always m.host: an IP literal is
+      // checked as that IP and sends no SNI (Node, given a socket, would
+      // otherwise check "localhost")
       if (!net.isIP(m.host)) opts.servername = m.host;
+      opts.checkServerIdentity = (_, cert) => tls.checkServerIdentity(m.host, cert);
       if (m.ca) opts.ca = m.ca;
       if (m.cert) { opts.cert = m.cert; opts.key = m.key; }
       let s;

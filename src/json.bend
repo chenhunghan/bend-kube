@@ -178,6 +178,21 @@ def Json.chain(xs: Json) -> List<&2, Json>:
     case _:
       Nil{}
 
+def Json.mem_keys(ms: Json) -> List<&2, String>:
+  match ms:
+    case JMem{k, v, t}:
+      k <> Json.mem_keys(t)
+    case _:
+      Nil{}
+
+# The keys of an object, in order; Nil for anything else.
+def Json.keys(j: Json) -> List<&2, String>:
+  match j:
+    case JObj{ms}:
+      Json.mem_keys(ms)
+    case _:
+      Nil{}
+
 # The elements of an array, in order; Nil for anything else.
 def Json.items(j: Json) -> List<&2, Json>:
   match j:

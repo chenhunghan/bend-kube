@@ -57,6 +57,28 @@ def KErr.code(e: KErr) -> U32:
     case _:
       0
 
+def KErr.reason(e: KErr) -> String:
+  match e:
+    case KApi{C.Status{c, r, m}}:
+      r
+    case _:
+      ""
+
+# A write lost to a newer resourceVersion (409 Conflict): read again and
+# retry (client-go's retry.RetryOnConflict case).
+def KErr.is_conflict(+e: KErr) -> Bool:
+  Bool.and(U32.is_eq(KErr.code(e), 409), Bool.not(String.eq(KErr.reason(e), "AlreadyExists")))
+
+def KErr.is_not_found(+e: KErr) -> Bool:
+  U32.is_eq(KErr.code(e), 404)
+
+def KErr.is_already_exists(+e: KErr) -> Bool:
+  Bool.and(U32.is_eq(KErr.code(e), 409), String.eq(KErr.reason(e), "AlreadyExists"))
+
+# The server is shedding load (429): back off before retrying.
+def KErr.is_throttled(+e: KErr) -> Bool:
+  U32.is_eq(KErr.code(e), 429)
+
 # Files
 # -----
 
@@ -184,7 +206,7 @@ def Creds.load.a(ca: Res(String), cert: K.Src, key: K.Src, tok: K.Src) -> IO(Res
 # Reads every secret a Config names; token files are read afresh each time.
 def Creds.load(c: K.Config) -> IO(Res(Creds)):
   match c:
-    case K.Config{h, p, b, ca, cert, key, tok, ns, pl}:
+    case K.Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
       IO.bind(Res(String), Res(Creds), Src.load(ca), a => Creds.load.a(a, cert, key, tok))
 
 def Conn.auth.go(token: String, none: Bool) -> List<&2, H.Header>:
@@ -201,7 +223,7 @@ def Conn.auth(+token: String) -> List<&2, H.Header>:
   Conn.auth.go(token, String.is_empty(token))
 
 def Conn.user_agent() -> String:
-  "bend-kube/0.1"
+  "bend-kube"
 
 def Conn.keep(keep: Bool) -> String:
   match keep:
@@ -254,19 +276,19 @@ def Conn.open.go(r: Res(Socket), text: String) -> IO(Res(N.Tls)):
     case Fail{e}:
       IO.pure(Res(N.Tls), Fail{e})
 
-def Conn.open.creds(+h: String, +p: U32, +base: String, req: H.Req, keep: Bool, cr: Res(Creds)) ->
-  IO(Res(N.Tls)):
+def Conn.open.creds(+h: String, +p: U32, +sn: String, +base: String, req: H.Req, keep: Bool,
+  cr: Res(Creds)) -> IO(Res(N.Tls)):
   match cr:
     case Done{Creds{ca, cert, key, +tok}}:
-      IO.bind(Res(Socket), Res(N.Tls), N.Tls.open(h, p, ca, cert, key, 15000),
+      IO.bind(Res(Socket), Res(N.Tls), N.Tls.open(h, p, sn, ca, cert, key, 15000),
         r => Conn.open.go(r, Conn.render(req, base, Conn.host_header(h, p), tok, keep)))
     case Fail{e}:
       IO.pure(Res(N.Tls), Fail{e})
 
 def Conn.open(+cfg: K.Config, req: H.Req, keep: Bool) -> IO(Res(N.Tls)):
   match cfg:
-    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl}:
-      IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.open.creds(h, p, b, req, keep, cr))
+    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn}:
+      IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.open.creds(h, p, sn, b, req, keep, cr))
 
 # Reading a reply
 # ---------------
@@ -372,7 +394,7 @@ def Conn.send_on.creds(s: Socket, +h: String, +p: U32, +base: String, req: H.Req
 
 def Conn.send_on(+cfg: K.Config, s: Socket, req: H.Req) -> IO(Res(N.Tls)):
   match cfg:
-    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl}:
+    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn}:
       IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.send_on.creds(s, h, p, b, req, cr))
 
 def Http.got_any(r: H.Resp) -> Bool:
@@ -495,9 +517,69 @@ def Client.send.with(+cfg: K.Config, req: H.Req, pool: Maybe<&2, Chan(Socket)>) 
     case None{}:
       IO.bind(Res(N.Tls), Result<&2, &2, KErr, Reply>, Conn.open(cfg, req, False{}), Call.read)
 
-# Sends a request and reads the whole reply, whatever its status.
+# Rate limit
+# ----------
+#
+# client-go's token bucket (flowcontrol.NewTokenBucketRateLimiter): a
+# bucket holds up to burst tokens, refilled at qps a second, and every
+# request but a watch waits for a token. The bucket is a channel of burst
+# slots; a refiller puts tokens in, dropping those that find it full.
+
+def Limit.fill(n: Nat, +ch: Chan(Unit)) -> IO(Unit):
+  match n:
+    case 0n:
+      IO.pure(Unit, Unit{})
+    case 1n+k:
+      IO.bind(Poll<&1, &1, Result<&1, &1, Unit, Unit>, Unit>, Unit, Chan.try_send(Unit, ch, Unit{}, 0),
+        p => Limit.fill(k, ch))
+
+# A tick of every ms earns qps * every / 1000 tokens; the remainder (in
+# thousandths of a token) carries to the next tick, so the rate is exact.
+# A tick adds at most burst tokens: the rest would find the bucket full.
+def Limit.tick(+qps: U32, +every: U32, +burst: U32, +carry: U32) -> Nat:
+  U32.to_nat(U32.min(((carry + qps * every) / 1000 : U32), burst))
+
+def Limit.carry(+qps: U32, +every: U32, +carry: U32) -> U32:
+  ((carry + qps * every) % 1000 : U32)
+
+def Limit.refill(outer: Nat, fuel: Nat, +ch: Chan(Unit), +qps: U32, +every: U32, +burst: U32,
+  +carry: U32) -> IO(Unit):
+  match outer fuel:
+    case 0n 0n:
+      IO.die(Unit, 1, "bend-kube: rate limiter out of steps")
+    case 1n+o 0n:
+      Limit.refill(o, 4294967295n, ch, qps, every, burst, carry)
+    case o 1n+f:
+      IO.bind(Unit, Unit, IO.sleep(every),
+        u => IO.bind(Unit, Unit, Limit.fill(Limit.tick(qps, every, burst, carry), ch),
+          u2 => Limit.refill(o, f, ch, qps, every, burst, Limit.carry(qps, every, carry))))
+
+# Ticks of 10ms, or longer for slow rates (one token a tick), at most 1s.
+def Limit.every(+qps: U32) -> U32:
+  U32.min(U32.max((1000 / qps : U32), 10), 1000)
+
+# A full bucket of burst tokens, refilled at qps a second (qps above 0).
+def Limit.start(+qps: U32, +burst: U32) -> IO(Chan(Unit)):
+  IO.bind(Chan(Unit), Chan(Unit), Chan.new(Unit, U32.max(burst, 1)),
+    +ch => IO.bind(Unit, Chan(Unit), Limit.fill(U32.to_nat(U32.max(burst, 1)), ch),
+      u => IO.bind(Unit, Chan(Unit),
+        IO.spawn(Unit, Limit.refill(4294967295n, 4294967295n, ch, qps, Limit.every(qps),
+          U32.max(burst, 1), 0)),
+        u2 => IO.pure(Chan(Unit), ch))))
+
+def Client.send.gate(+cfg: K.Config, req: H.Req, m: Maybe<&2, Chan(Unit)>) ->
+  IO(Result<&2, &2, KErr, Reply>):
+  match m:
+    case Some{ch}:
+      IO.bind(Maybe<&1, Unit>, Result<&2, &2, KErr, Reply>, Chan.recv(Unit, ch),
+        u => Client.send.with(cfg, req, K.Config.pool(cfg)))
+    case None{}:
+      Client.send.with(cfg, req, K.Config.pool(cfg))
+
+# Sends a request and reads the whole reply, whatever its status, after
+# taking a token when the config has a rate limit.
 def Client.send(+cfg: K.Config, req: H.Req) -> IO(Result<&2, &2, KErr, Reply>):
-  Client.send.with(cfg, req, K.Config.pool(cfg))
+  Client.send.gate(cfg, req, K.Config.limit(cfg))
 
 def Client.json.status.fix.go(+c: U32, +k: U32, r: String, m: String, zero: Bool) -> C.Status:
   match zero:
@@ -555,6 +637,17 @@ def Client.replace(+cfg: K.Config, a: C.Api, name: String, obj: J.Json) ->
 def Client.delete(+cfg: K.Config, a: C.Api, name: String) -> IO(Result<&2, &2, KErr, J.Json>):
   Client.json(cfg, C.Req.delete(a, name))
 
+# A delete with options: propagation, grace period, preconditions.
+def Client.delete_with(+cfg: K.Config, a: C.Api, name: String, o: C.DeleteOpts) ->
+  IO(Result<&2, &2, KErr, J.Json>):
+  Client.json(cfg, C.Req.delete_with(a, name, o))
+
+# Replaces the status subresource (a PUT carrying the object's
+# resourceVersion, so a stale write fails with 409).
+def Client.replace_status(+cfg: K.Config, a: C.Api, name: String, obj: J.Json) ->
+  IO(Result<&2, &2, KErr, J.Json>):
+  Client.json(cfg, C.Req.replace_status(a, name, obj))
+
 def Client.patch(+cfg: K.Config, a: C.Api, name: String, p: C.PatchKind, body: J.Json) ->
   IO(Result<&2, &2, KErr, J.Json>):
   Client.json(cfg, C.Req.patch(a, name, "", p, body))
@@ -568,6 +661,13 @@ def Client.patch_status(+cfg: K.Config, a: C.Api, name: String, p: C.PatchKind, 
 def Client.apply(+cfg: K.Config, a: C.Api, name: String, manager: String, body: J.Json) ->
   IO(Result<&2, &2, KErr, J.Json>):
   Client.patch(cfg, a, name, C.PApply{manager, True{}}, body)
+
+# Server-side apply that only forces when asked: without force, a field
+# another manager owns (an HPA's spec.replicas) fails with 409 Conflict
+# rather than being taken over.
+def Client.apply_with(+cfg: K.Config, a: C.Api, name: String, manager: String, force: Bool,
+  body: J.Json) -> IO(Result<&2, &2, KErr, J.Json>):
+  Client.patch(cfg, a, name, C.PApply{manager, force}, body)
 
 def Kc.rebased(r: Result<&2, &2, String, J.Json>, +path: String) -> Result<&2, &2, String, J.Json>:
   match r:

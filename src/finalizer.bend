@@ -1,6 +1,7 @@
 import Base
 import ./json.bend as J
 import ./core.bend as C
+import ./queue.bend as Q
 
 # Finalizer
 # =========
@@ -82,3 +83,17 @@ def Fin.state.go(+fs: List<&2, String>, +name: String, at: Maybe<&2, U32>, delet
 def Fin.state(+o: J.Json, +name: String) -> FState:
   Fin.state.go(C.Obj.finalizers(o), name, Fin.index(C.Obj.finalizers(o), name, 0),
     C.Obj.is_deleting(o))
+
+# Whether a cleanup's answer keeps the finalizer: a failure (Retry,
+# RetryIn) or an unfinished cleanup (Hold) does, so the object stays until
+# the cleanup is done; any other answer means done, and the finalizer goes.
+def Fin.keeps(a: Q.Action) -> Bool:
+  match a:
+    case Q.Retry{m}:
+      True{}
+    case Q.RetryIn{m, ms}:
+      True{}
+    case Q.Hold{ms}:
+      True{}
+    case _:
+      False{}

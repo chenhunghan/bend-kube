@@ -16,7 +16,7 @@ fail() { echo "FAIL $*"; exit 1; }
 k() { kubectl -n bend-e2e "$@"; }
 
 echo "== build"
-for e in smoke website guard; do (cd examples && bend $e.bend -o "$work/$e") >/dev/null 2>&1 || fail "build $e"; done
+for e in smoke website guard bundle; do (cd examples && bend $e.bend -o "$work/$e") >/dev/null 2>&1 || fail "build $e"; done
 kubectl config view --raw --minify -o json > "$work/kc.json"; chmod 600 "$work/kc.json"
 pass build
 
@@ -31,6 +31,17 @@ json.dump(c, open(w + "/wrong-ca.json", "w"))
 PY
 KUBECONFIG="$work/wrong-ca.json" "$work/smoke" | grep "server certificate rejected" >/dev/null \
   && pass "an unknown CA is rejected" || fail "an unknown CA was accepted"
+python3 -I - "$work" <<'PY'
+import json, sys
+w = sys.argv[1]
+for name, out in (("kubernetes.default.svc", "sni-ok"), ("wrong.example", "sni-bad")):
+    c = json.load(open(w + "/kc.json"))
+    c["clusters"][0]["cluster"]["tls-server-name"] = name
+    json.dump(c, open(w + "/" + out + ".json", "w"))
+PY
+KUBECONFIG="$work/sni-ok.json" "$work/smoke" | grep "^ok " >/dev/null \
+  && KUBECONFIG="$work/sni-bad.json" "$work/smoke" | grep "server certificate rejected" >/dev/null \
+  && pass "tls-server-name verifies the server as that name" || fail "tls-server-name"
 
 echo "== proxy"
 # Loopback hosts never use a proxy (as in Go), so the tunnel reaches the API
@@ -63,6 +74,8 @@ EOF
 for _ in $(seq 1 60); do [ "$(k get website hello -o jsonpath='{.status.phase}' 2>/dev/null)" = Ready ] && break; sleep 2; done
 [ "$(k get website hello -o jsonpath='{.status.phase}')" = Ready ] && pass "website becomes Ready" || fail "website not Ready"
 [ "$(k get deploy hello -o jsonpath='{.metadata.ownerReferences[0].kind}')" = Website ] && pass "deployment owned" || fail "deployment not owned"
+[ "$(k get website hello -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" = True ] \
+  && pass "Ready condition set" || fail "Ready condition"
 k patch website hello --type merge -p '{"spec":{"replicas":2}}' >/dev/null
 for _ in $(seq 1 60); do [ "$(k get website hello -o jsonpath='{.status.readyReplicas}')" = 2 ] && break; sleep 2; done
 [ "$(k get website hello -o jsonpath='{.status.readyReplicas}')" = 2 ] && pass "scale follows spec" || fail "scale"
@@ -99,5 +112,58 @@ for _ in $(seq 1 30); do k get cm shared-mirror >/dev/null 2>&1 && break; sleep 
 k get cm shared-mirror >/dev/null 2>&1 && pass "first controller reconciles" || fail "mirror"
 grep '"audit"' "$work/multi.log" | grep "bend-e2e/shared" >/dev/null && pass "second controller reconciles" || fail "audit"
 [ "$(grep -c '"listing"' "$work/multi.log")" = 1 ] && pass "three subscriptions, one list and watch" || fail "watch not shared"
+
+echo "== cached reads and references"
+pkill -f "$work/multi" || true
+sed 's/"bend-demo"/"bend-e2e"/' examples/bundle.bend > examples/.bundle-e2e.bend
+(cd examples && bend .bundle-e2e.bend -o "$work/bundle") >/dev/null 2>&1; rm -f examples/.bundle-e2e.bend
+k create secret generic s1 --from-literal=user=a --from-literal=pass=b >/dev/null
+k create configmap b1 --from-literal=secret=s1 >/dev/null; k label configmap b1 bend-kube/bundle=true >/dev/null
+KUBECONFIG="$work/kc.json" "$work/bundle" > "$work/bundle.log" 2>&1 &
+for _ in $(seq 1 30); do [ "$(k get cm b1-keys -o jsonpath='{.data.keys}' 2>/dev/null)" = '["pass","user"]' ] && break; sleep 1; done
+[ "$(k get cm b1-keys -o jsonpath='{.data.keys}')" = '["pass","user"]' ] && pass "reconcile reads a referenced secret from the cache" || fail "bundle keys"
+k patch secret s1 -p '{"stringData":{"token":"x"}}' >/dev/null
+for _ in $(seq 1 30); do k get cm b1-keys -o jsonpath='{.data.keys}' | grep token >/dev/null && break; sleep 1; done
+k get cm b1-keys -o jsonpath='{.data.keys}' | grep token >/dev/null && pass "a referenced secret's change reconciles its bundle" || fail "reference trigger"
+grep '"owned":"1"' "$work/bundle.log" >/dev/null && pass "owned outputs read from the cache" || fail "children"
+kill -TERM "$(pgrep -f "$work/bundle")"
+for _ in $(seq 1 20); do pgrep -f "$work/bundle" >/dev/null || break; sleep 0.25; done
+pgrep -f "$work/bundle" >/dev/null && fail "bundle did not exit on SIGTERM" || true
+grep '"reconciles drained"' "$work/bundle.log" >/dev/null && pass "SIGTERM drains and exits" || fail "drain"
+
+echo "== rate limit and drain"
+(cd tests/fixtures && bend slow.bend -o "$work/slow") >/dev/null 2>&1 || fail "build slow"
+k create configmap slow --from-literal=a=b >/dev/null; k label configmap slow bend-kube/slow=true >/dev/null
+KUBECONFIG="$work/kc.json" "$work/slow" > "$work/slow.log" 2>&1 &
+for _ in $(seq 1 60); do grep '"gets done"' "$work/slow.log" >/dev/null && break; sleep 0.25; done
+kill -TERM "$(pgrep -f "$work/slow")"
+python3 -I - "$work/slow.log" <<'PY' && pass "13 requests at 4 qps, burst 2, take about 2.75s" || fail "rate limit"
+import datetime, json, sys
+ev = {j["msg"]: j["ts"] for j in map(json.loads, open(sys.argv[1]))}
+t = lambda m: datetime.datetime.fromisoformat(ev[m].replace("Z", "+00:00"))
+d = (t("gets done") - t("starting controllers")).total_seconds()
+sys.exit(0 if 2.4 <= d <= 4.5 else 1)
+PY
+for _ in $(seq 1 40); do pgrep -f "$work/slow" >/dev/null || break; sleep 0.25; done
+grep -A2 '"draining reconciles"' "$work/slow.log" | grep '"end"' >/dev/null \
+  && grep '"reconciles drained"' "$work/slow.log" >/dev/null && pass "SIGTERM waits for a running reconcile" || fail "drain mid-reconcile"
+
+echo "== leader election"
+kubectl create ns bend-kube-system >/dev/null 2>&1 || true
+holder() { kubectl -n bend-kube-system get lease bend-kube-website -o jsonpath='{.spec.holderIdentity}' 2>/dev/null; }
+HOSTNAME=replica-a BEND_KUBE_PORT=18081 KUBECONFIG="$work/kc.json" "$work/website" > "$work/lead-a.log" 2>&1 &
+pid_a=$!
+for _ in $(seq 1 30); do holder | grep '^replica-a_' >/dev/null && break; sleep 1; done
+HOSTNAME=replica-b BEND_KUBE_PORT=18082 KUBECONFIG="$work/kc.json" "$work/website" > "$work/lead-b.log" 2>&1 &
+pid_b=$!
+sleep 6
+holder | grep '^replica-a_' >/dev/null && ! grep '"became leader"' "$work/lead-b.log" >/dev/null \
+  && pass "one leader; the standby waits" || fail "two leaders"
+kill -TERM "$pid_a"
+for _ in $(seq 1 20); do holder | grep '^replica-b_' >/dev/null && break; sleep 0.5; done
+holder | grep '^replica-b_' >/dev/null && grep '"released leader lease"' "$work/lead-a.log" >/dev/null \
+  && pass "SIGTERM hands the lease over within seconds" || fail "handover"
+kill -TERM "$pid_b"; wait "$pid_b" 2>/dev/null || true
+kubectl -n bend-kube-system delete lease bend-kube-website >/dev/null 2>&1 || true
 
 echo; echo "all e2e tests pass"

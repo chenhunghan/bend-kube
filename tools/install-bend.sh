@@ -3,9 +3,9 @@
 # sha256. bend-kube needs exactly this version: Bend's C effect interface
 # has no ABI promise, so upgrades go through CI (tools/ci.sh checks it).
 set -eu
-BEND_VERSION=${BEND_VERSION:-2.0.39}
-BEND_SHA_ARM64=${BEND_SHA_ARM64:-71b43e1bb9313dd14ac2b0553b854e41c39d65ecaa47040796ebff4a46f54a97}
-BEND_SHA_X64=${BEND_SHA_X64:-6cf462fd8f70b094a4950ebb709a9c4ffd8f1d1189d9cedf1fd63cd5d041c7ab}
+BEND_VERSION=${BEND_VERSION:-2.0.40}
+BEND_SHA_ARM64=${BEND_SHA_ARM64:-2f42a6fa34ecdaa71ae105e5fa734f9a07e129d333e45448ab6d2ff03a837570}
+BEND_SHA_X64=${BEND_SHA_X64:-c9ff8d67bd903fb6ad9a26b43d8a62c01021de82a44d55ce4a3dcd4732113d6b}
 case "$(uname -m)" in
   aarch64|arm64) arch=arm64; sum=$BEND_SHA_ARM64;;
   x86_64|amd64) arch=x64; sum=$BEND_SHA_X64;;

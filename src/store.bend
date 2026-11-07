@@ -9,7 +9,8 @@ import ./watcher.bend as W
 # kube-runtime's reflector Store, keyed as client-go's cache is ("ns/name"
 # or "name"). A relist builds a fresh buffer between Init and InitDone and
 # swaps it in whole, so an object deleted while the watch was down leaves
-# the store with the relist (kube-runtime's buffered reflector).
+# the store with the relist (kube-runtime's buffered reflector). Objects
+# are kept without metadata.managedFields (Store.slim).
 
 type Store is Data:
   Store{objs: Map<&2, J.Json>, buf: Map<&2, J.Json>, ready: Bool}
@@ -17,16 +18,35 @@ type Store is Data:
 def Store.new() -> Store:
   Store{Map.new(&2, J.Json), Map.new(&2, J.Json), False{}}
 
+def Store.slim.ann(+m: J.Json, none: Bool) -> J.Json:
+  match none:
+    case True{}:
+      m
+    case False{}:
+      J.Json.set(m, "annotations",
+        J.Json.del(J.Json.get(m, "annotations"), "kubectl.kubernetes.io/last-applied-configuration"))
+
+def Store.slim.meta(+x: J.Json, +m: J.Json) -> J.Json:
+  J.Json.set(x, "metadata", Store.slim.ann(m, J.Json.is_null(J.Json.get(m, "annotations"))))
+
+# What the store keeps of an object: all but metadata.managedFields (the
+# server-side apply bookkeeping, often half an object's size) and the
+# kubectl.kubernetes.io/last-applied-configuration annotation (a whole copy
+# of what kubectl applied, a Secret's data included). Controllers read
+# neither (kube-rs's and controller-runtime's usual cache transform).
+def Store.slim(+x: J.Json) -> J.Json:
+  Store.slim.meta(x, J.Json.del(J.Json.get(x, "metadata"), "managedFields"))
+
 def Store.apply(s: Store, o: W.Out) -> Store:
   match s o:
     case Store{objs, buf, r} W.OInit{}:
       Store{objs, Map.new(&2, J.Json), r}
     case Store{objs, buf, r} W.OInitApply{+x}:
-      Store{objs, Map.set(&2, J.Json, buf, C.Obj.key(x), x), r}
+      Store{objs, Map.set(&2, J.Json, buf, C.Obj.key(x), Store.slim(x)), r}
     case Store{objs, buf, r} W.OInitDone{}:
       Store{buf, Map.new(&2, J.Json), True{}}
     case Store{objs, buf, r} W.OApply{+x}:
-      Store{Map.set(&2, J.Json, objs, C.Obj.key(x), x), buf, r}
+      Store{Map.set(&2, J.Json, objs, C.Obj.key(x), Store.slim(x)), buf, r}
     case Store{objs, buf, r} W.ODelete{+x}:
       Store{Map.del(&2, J.Json, objs, C.Obj.key(x)), buf, r}
 
@@ -81,3 +101,24 @@ def Store.values(s: Store) -> List<&2, J.Json>:
   match s:
     case Store{+o, b, r}:
       Store.values.go(Map.keys(&2, J.Json, o), o)
+
+def Store.dropped.put(+k: String, r: Map<&2, J.Json> & Bool, rest: List<&2, String>) -> List<&2, String>:
+  match r:
+    case (m, True{}):
+      rest
+    case (m, False{}):
+      k <> rest
+
+def Store.dropped.go(ks: List<&2, String>, +buf: Map<&2, J.Json>) -> List<&2, String>:
+  match ks:
+    case Nil{}:
+      Nil{}
+    case Con{+k, t}:
+      Store.dropped.put(k, Map.has(&2, J.Json, buf, k), Store.dropped.go(t, buf))
+
+# The keys a relist drops: cached now, absent from the buffer InitDone is
+# about to swap in (objects deleted while the watch was down).
+def Store.dropped(s: Store) -> List<&2, String>:
+  match s:
+    case Store{+o, +b, r}:
+      Store.dropped.go(Map.keys(&2, J.Json, o), b)

@@ -23,15 +23,23 @@ import bend-kube-runtime@0.2.0.0/src/json.bend as J
 import bend-kube-runtime@0.2.0.0/src/core.bend as C
 import bend-kube-runtime@0.2.0.0/src/config.bend as K
 import bend-kube-runtime@0.2.0.0/src/queue.bend as Q
+import bend-kube-runtime@0.2.0.0/src/control.bend as X
 import bend-kube-runtime@0.2.0.0/src/kube.bend as Kb
 
-def reconcile(o: J.Json, cfg: K.Config) -> IO(Q.Action):
-  # make the world match o, idempotently; then say when to look again
+def reconcile(o: J.Json, c: X.Ctx) -> IO(Q.Action):
+  # make the world match o, idempotently, reading the caches through c
+  # (X.Ctx.cfg, X.Ctx.children, X.Ctx.find); then say when to look again
   IO.pure(Q.Action, Q.Requeue{300000})
 
+# ConfigMaps, reconciled on spec changes (none for ConfigMaps: every change),
+# owning Deployments.
+def spec() -> X.Spec:
+  X.Spec.filter(X.Spec.owns(X.Spec.of(C.Api{C.Res.config_maps(), C.InNs{"default"}}),
+    C.Api{C.Res.deployments(), C.InNs{"default"}}), [X.PGeneration{}])
+
 def main() -> IO(Unit):
-  Kb.Kube.run(~reconcile, C.Api{C.Res.config_maps(), C.InNs{"default"}}, Nil{},
-    Kb.Opts.with_leader(Kb.Opts.default(), "default", "my-controller", "replica-a"))
+  Kb.Kube.control(~reconcile, spec(),
+    Kb.Opts.with_election(Kb.Opts.default(), "default", "my-controller"))
 ```
 <!-- x-release-please-end -->
 
@@ -53,6 +61,7 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/watcher.bend` | kube-runtime `watcher`, client-go `Reflector` | yes |
 | `src/store.bend` | kube-runtime `reflector::Store` | yes |
 | `src/queue.bend` | client-go `workqueue`, kube-runtime `scheduler` | yes |
+| `src/control.bend` | kube-runtime `Controller` builder, `predicates`, trigger mappers; controller-runtime `Watches` | yes |
 | `src/lease.bend` | client-go `leaderelection.tryAcquireOrRenew` | yes |
 | `src/finalizer.bend` | kube-runtime `finalizer` (decisions) | yes |
 | `src/proxy.bend` | Go's `ProxyFromEnvironment` and the CONNECT exchange | yes |
@@ -86,26 +95,137 @@ laws can range over all of the controller's logic.
   on a watch event, a watch request or a continue token, relists from
   scratch at once.
 - Other failures back off exponentially (800ms doubling to 30s, plus up to
-  50% jitter); success resets it.
+  50% jitter); success resets it. A watch stream that is cut off, or that
+  ends without a whole response, counts as a failure. Only the server's
+  orderly end resumes at once, so a flapping server or load balancer isn't
+  hammered.
+- Failures are logged with their reason: the API status, or the network
+  error.
 - `resourceVersion` is opaque: it is copied and never compared.
 
 **Caching:** a relist builds a fresh buffer between Init and InitDone and
 swaps it in whole, so objects deleted while the watch was down disappear.
+Objects are cached without `metadata.managedFields` (the server-side apply
+bookkeeping, often half an object's size) and without the
+`kubectl.kubernetes.io/last-applied-configuration` annotation (a whole
+copy of what kubectl applied, a Secret's data included). These are the
+transforms kube-rs and controller-runtime users apply by hand.
+
+**Controllers** (`src/control.bend`; kube-runtime's `Controller` builder):
+`X.Spec.of(api)` names the primary, and
+`Kube.control(~rec, spec, opts)` runs it with `rec(obj, ctx)`:
+
+- `X.Spec.owns(s, api)` watches objects the primary owns. To narrow the
+  watch by label, use `X.Spec.watches_where(s, api, label, "", X.ROwner{})`. An event on one
+  (deletions included) queues the owners it names that have the primary's
+  kind and API group.
+  - A namespaced primary is looked up in the child's namespace.
+  - A cluster-scoped primary is looked up by name alone.
+- `X.Spec.watches(s, api, rel)` watches any related kind, mapped to
+  primaries by a relation. The relation is applied to the object as cached
+  before the change and as it is after, so if the link moves, the old
+  primary and the new one both reconcile:
+  - `X.ROwner{}`: owner references.
+  - `X.RLabel{key}`: a label names the primary.
+  - `X.RRef{path}`: a field of the primary (a string, or a list of strings)
+    names the object. An example is a Secret named in `spec.secretName`.
+  - `X.RAll{}`: every primary in the object's namespace.
+
+  When a related watch relists, objects that vanished while it was down
+  reconcile the primaries they mapped to. `X.Spec.watches_where(s, api,
+  label, field, rel)` adds label and field selectors.
+
+  `X.Spec.drop(s, ["data", "stringData"])` keeps top-level fields of the
+  last related watch out of its cache. A controller that only needs to
+  know a referenced Secret changed then holds no Secret's data; it reads
+  what it needs with `Client.get`.
+- `X.Spec.filter(s, preds)` (kube-runtime's `predicate_filter`): a primary
+  change reconciles only when one of these differs from the cached object:
+  `X.PGeneration{}` (the spec), `X.PLabels{}`, `X.PAnnotations{}` or
+  `X.PFinalizers{}`. So with `[X.PGeneration{}]`, a controller's own status
+  writes don't wake it.
+  - An object the cache hasn't seen always passes.
+  - A deletion that starts always passes, and so does a change of
+    finalizers. A controller that adds its finalizer and waits is therefore
+    woken by the change.
+  - An object without a generation (a ConfigMap) passes on every change.
+  - An unchanged relist is quiet.
+
+  Requeues and retries are not filtered.
+- `X.Spec.label` and `X.Spec.field` set the primary's selectors.
+  `X.Spec.max` sets how many reconciles run at once (default 8, at least 1).
+- `X.Spec.timeout(s, ms)` treats a reconcile still running after ms as
+  failed: it is retried with backoff and its key and slot are freed. The
+  late run is not cancelled, so it must stay idempotent.
+  - The default is no limit. Each limit holds a sleeper until it expires,
+    even after the reconcile finishes, so a five-minute timeout at 100
+    reconciles a second holds 30,000 sleepers.
+  - Without a limit, a hung reconcile holds its slot. `bendkube_reconcile_running`
+    stuck at the maximum shows it.
+- **Reconcile context:** `ctx` gives:
+  - the client config (`X.Ctx.cfg`) and the controller's index
+    (`X.Ctx.idx`);
+  - how many times in a row this key has failed (`X.Ctx.fails`), so a
+    reconcile can escalate or give up;
+  - read-only snapshots of every cache: the primary's (`X.Ctx.get`,
+    `X.Ctx.list`), and each related watch's, numbered from 1 in the order
+    added (`X.Ctx.find`, `X.Ctx.all`). `X.Ctx.children(ctx, n, owner)`
+    returns the objects the owner controls (`controller: true`, by uid).
+
+  Reads from the cache aren't requests to the API server.
+- No reconcile starts until every cache has listed. `/readyz` waits for all
+  of them.
+- **Errors:** a reconcile answers `Retry{msg}` to back off, or
+  `RetryIn{msg, ms}` when it chooses the delay itself. Both are logged as
+  warnings with the key and count as errors. `Hold{ms}` means "not done
+  yet, look again after ms" and isn't an error. `Cl.KErr` has
+  `is_conflict`, `is_not_found`, `is_already_exists` and `is_throttled`.
+- **Status:** `src/cond.bend` keeps `status.conditions` as
+  apimachinery's `meta.SetStatusCondition` does. `Cond.set` replaces a
+  condition by type, and `lastTransitionTime` changes only when the status
+  does. `Cond.get`, `Cond.is_true` and `Cond.patch` help write them with
+  `Client.patch_status`. `Client.replace_status` puts the whole status.
+- **Finalizers:** `Finalizer.control(~apply, ~cleanup, ctx, api, name, obj)`
+  is kube-runtime's `finalizer()`, with callbacks that get the context. A
+  cleanup that answers `Retry`, `RetryIn` or `Hold` keeps the finalizer, so
+  a cleanup waiting on an external deletion holds the object without
+  counting errors. Any other answer removes it.
+- **Writes:** `Client.apply` forces conflicts, as a controller that owns
+  its fields wants. `Client.apply_with(.., force, ..)` doesn't force, so a
+  field another manager owns (an HPA's `spec.replicas`) fails with 409
+  instead of being taken over.
+- **Deletes:** `Client.delete_with(cfg, api, name, C.DeleteOpts{..})` sets
+  propagation (`Background`, `Foreground`, `Orphan`), a grace period, and
+  uid or resourceVersion preconditions.
+- `Kube.control_with(~rec, cfg, specs, opts)` runs controllers against a
+  given config: another cluster, or a test server.
+
+`Kube.run(~rec, primary, owned, opts)` remains, with `rec(obj, cfg)`; it is
+`Kube.control` with owned watches and no predicates.
 
 **Queueing** (client-go's workqueue):
 
 - A key waits in the queue at most once.
 - A key never runs on two workers at once. If it is added while it runs, it
   runs again when the current run ends.
-- At most `Opts.max` reconciles run concurrently.
+- At most `X.Spec.max` (`Opts.max` for `Kube.run`) reconciles run
+  concurrently.
 - Errors back off per key, from 5ms doubling to at most 1000s.
 - A delayed requeue is staled by any newer add.
-- Deleted keys are forgotten.
+- A key has at most one pending wake, the earliest asked for by the
+  monotonic clock, with one sleeper (kube-runtime's scheduler). Requeues
+  never pile up timers. Delays of a second or more get up to 10% jitter, so
+  requeues armed together spread out.
+- When a key leaves the queue and its object is gone, its bookkeeping is
+  forgotten. That covers objects deleted while their key ran or waited, and
+  objects a relist dropped.
+- A key whose object is gone frees its slot for the keys behind it.
 - Nothing is reconciled until the first list completes.
 
 **Many controllers, shared watches** (controller-runtime's Manager,
-kube-runtime's shared reflectors): `Kube.run_all(~rec, [Ctrl{..}, ..], opts)`
-runs several controllers in one process. Each has its own loop, store and
+kube-runtime's shared reflectors): `Kube.control_all(~rec, [spec, ..],
+opts)` (or the older `Kube.run_all(~rec, [Ctrl{..}, ..], opts)`) runs several
+controllers in one process; `X.Ctx.idx(ctx)` names the one reconciling. Each has its own loop, store and
 queue, but a watch two of them need (same resource, scope and label
 selector) runs once and fans out to both. `examples/multi.bend` runs three
 subscriptions on one list and watch. Metrics carry a
@@ -124,12 +244,40 @@ deadline):
 
 - Expiry is judged by this process's own clock, by when it last saw the
   record change. Remote timestamps are never compared.
+- Each Lease read and write is bounded by what is left of the renew
+  deadline. Lateness is judged by the clock after the calls return, so a
+  hung write cannot keep a stale leader running.
+- Lease calls bypass the client rate limit, so a burst of reconciles
+  cannot delay a renewal.
 - Lease writes go through `resourceVersion`, so of two contenders only one
   write lands.
 - A leader that cannot renew within the deadline exits with status 1, so
   two leaders never act at once.
-- SIGTERM releases the Lease and exits with status 0, so failover takes
-  milliseconds.
+- SIGTERM drains (see Shutdown), then releases the Lease and exits with
+  status 0, so failover takes milliseconds after the drain. The release
+  reads the Lease afresh and retries if a renewal raced it (a 409), up to
+  three times within 4s, and logs the outcome.
+- `Opts.with_election(o, ns, name)` names each replica by its pod
+  (`HOSTNAME`) plus a random suffix. Two replicas can't share an identity,
+  which would let both renew. `Opts.with_lease(o, E.LOpts{..})` sets the
+  identity, Lease duration, renew deadline and retry period by hand.
+- Every timing decision (Lease expiry, the renew deadline, lateness)
+  uses the monotonic clock, as client-go does. The wall clock only stamps
+  the Lease, so stepping it either way changes nothing. Time that runs
+  backwards still counts as none.
+
+**Shutdown:** on SIGTERM or SIGINT, with or without leader election, every
+controller stops starting reconciles. The process waits for the running
+ones, up to `Opts.with_grace`, then exits with status 0.
+- The default grace is 20s; with up to 4s to release the Lease, that fits
+  Kubernetes' default 30s termination grace period.
+- A replica whose controllers never started (a standby) exits at once.
+- A second signal exits at once, with status 1.
+
+**Client rate limit** (client-go's token bucket): every request except a
+watch takes a token from a bucket of `burst` tokens, refilled at `qps` a
+second. The default is 50 qps with a burst of 100; set it with
+`Opts.with_rate(o, qps, burst)`, where qps 0 turns the limit off.
 
 **Typed resources:** `tools/gen.py` turns a CRD or a type in a Kubernetes
 OpenAPI v3 document into Bend records with a decoder (`T.of`), an encoder
@@ -174,6 +322,11 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
 - The server is always verified against the given CA, or the system roots
   if none is given, and by name (or by IP for an IP literal), with TLS 1.2
   as the minimum.
+- `tls-server-name` (client-go's `TLSClientConfig.ServerName`) is honored:
+  the client connects to the server's host and verifies the certificate
+  against that name, which it also sends as SNI. This is how a client
+  behind NAT reaches a cluster whose certificate names `127.0.0.1` or
+  `localhost`. `K.Config.with_server_name` sets it in code.
 - `insecure-skip-tls-verify` is ignored.
 - `HTTPS_PROXY` and `NO_PROXY` are read as Go reads them (client-go uses
   Go's `ProxyFromEnvironment`), in pure Bend (`src/proxy.bend`):
@@ -216,11 +369,28 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
 **Operations:**
 
 - Logs are one JSON object per line on stderr.
-- `/healthz`, `/readyz` (503 until the store is synced; `standby` on a
-  replica that isn't the leader) and `/metrics` are served on `:8080`.
+- `/healthz`, `/readyz` and `/metrics` are served on `:8080`
+  (`Opts.with_port`; the `BEND_KUBE_PORT` environment variable overrides
+  it; 0 for none). `/readyz` answers:
+  - 503 until every cache is synced;
+  - `standby` on a replica that isn't the leader;
+  - 503 if the status keeper does not answer within 2s.
+- Each controller publishes its status at most once a second, whenever its
+  readiness changes, and one second after it goes idle with changes
+  unpublished.
+- A health port that can't be bound exits the process.
+- Events name the pod (`HOSTNAME`) as their reporting instance, and their
+  note is cut to the API's 1 kB.
 - Metrics: `bendkube_reconcile_total`, `bendkube_reconcile_errors_total`,
-  `bendkube_watch_events_total`, `bendkube_reconcile_running`,
-  `bendkube_store_objects`, `bendkube_store_ready` and `bendkube_leader`.
+  `bendkube_reconcile_duration_seconds` (a histogram with Prometheus'
+  default buckets), `bendkube_watch_events_total`,
+  `bendkube_reconcile_running`, `bendkube_queue_depth`,
+  `bendkube_store_objects` (the primary's cache),
+  `bendkube_cache_objects{cache="n"}` (each related watch's cache),
+  `bendkube_store_ready` and `bendkube_leader`.
+  Counters are 32-bit and wrap; Prometheus reads a wrap as a reset. The
+  duration sum is kept in seconds and lasts 136 years. A duration made
+  absurd by the wall clock stepping back counts as 0.
 - Events go to `events.k8s.io/v1` (`Event.publish`).
 
 **Parallelism:** the watch lines that arrive in one read are separate JSON
@@ -231,7 +401,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 33 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 55 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -258,6 +428,29 @@ loop.
   - a deleted object without it is done;
   - a deleted object with it is cleaned up, and the finalizer is removed
     only through a `test`ed patch at its index.
+- **Controllers:**
+  - without predicates every change reconciles; with them, an uncached
+    object always does;
+  - under the generation predicate a status write (same generation, any
+    version) does not, a new generation does, and so does the start of a
+    deletion;
+  - an object without a generation reconciles on every change;
+  - an applied primary is cached and queued; a deleted one leaves the
+    cache, queues nothing and is forgotten;
+  - an owned object queues the owner it names of the primary's kind and
+    API group, in its namespace;
+  - a cluster-scoped owner is queued by name;
+  - an owner of the same kind in another group queues nothing;
+  - under any predicate, a change of finalizers reconciles.
+- **Leader election:**
+  - another holder's Lease seen changing within its duration is live;
+  - our clock stepping back doesn't expire it;
+  - unchanged past its duration, it can be taken;
+  - our own Lease is renewed, and a released one is free.
+- **Finalizer cleanup:** a failed or held cleanup keeps the finalizer, and
+  a finished one releases it.
+- **Conditions:** setting a condition with an unchanged status keeps its
+  `lastTransitionTime`; a new status moves it.
 - **HTTP:** a connection that ends before any response byte is *lost*
   (safe to retry); one that ends mid-response is *broken* (never retried).
 - **Proxies:**
@@ -277,14 +470,14 @@ tools/ci.sh                      # laws, --verdict, module checks, tests, genera
 tests/run.sh                     # unit and scenario tests (UPDATE=1 rewrites expectations)
 tests/tls.sh                     # TLS and proxies against local servers, both lanes, sanitizers
 tests/package.sh                 # publish to a stand-in hub, build a controller from the package
-KUBECONFIG=test.yaml tests/e2e.sh   # proxy tunnel, typed operator, finalizer, shared watches, on a disposable cluster
+KUBECONFIG=test.yaml tests/e2e.sh   # on a disposable cluster: operator, finalizer, shared watches, cached reads, drain, rate limit, leader handover
 ./y2j crd.yaml > crd.json && tools/gen.py crd crd.json -o gen/my.bend   # typed CRD views (--lib bend-kube-runtime@X.Y.Z.0/src outside this repo)
 cd examples && bend mirror.bend -o mirror && KUBECONFIG=~/.kube/config ./mirror
 docker build --build-arg EXAMPLE=mirror -t bend-kube-mirror .   # proof-gated image
 kubectl apply -f deploy/mirror.yaml
 ```
 
-- **Bend version:** bend-kube needs Bend **2.0.39**. Bend's C effect interface
+- **Bend version:** bend-kube needs Bend **2.0.40**. Bend's C effect interface
   has no ABI promise, so `tools/ci.sh` and the Dockerfile pin the version
   (the Dockerfile also checks the archive's sha256). Rebuild and rerun CI on
   every upgrade.
@@ -301,7 +494,9 @@ kubectl apply -f deploy/mirror.yaml
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org)
 (`feat:`, `fix:`, `feat!:` …). `.github/workflows/ci.yml` runs
-`tools/ci.sh` on every pull request and push. On each push to `master`,
+`tools/ci.sh` on every pull request and push, and
+`.github/workflows/e2e.yml` runs `tests/e2e.sh` on a kind cluster for
+every pull request. On each push to `master`,
 `.github/workflows/release.yml` runs
 [release-please](https://github.com/googleapis/release-please), which keeps
 a release pull request up to date (version, `CHANGELOG.md`, the imports
@@ -323,12 +518,22 @@ Publishing needs the `BENDAI_KEY` repository secret: the `key` field of
   RBAC, probes and a restricted security context.
 - `examples/guard.bend` runs a finalizer and records Events on ConfigMaps
   selected by a label.
-- `examples/noop.bend` is a scale baseline: 2,029 ConfigMaps listed, cached
-  and reconciled in about 1s, at 37 MB RSS.
+- `examples/noop.bend` is a scale baseline:
+  - 20,018 ConfigMaps (586 bytes each as JSON) are listed, cached and
+    reconciled in 2.6s, and the process then holds 204 MB RSS;
+  - a further 2,000 updates are reconciled within 5s, and memory stays
+    flat (208 MB).
 - `examples/website.bend` is a typed operator: a generated `Website` CRD
   type, an owned Deployment, the status subresource, Warning events for
-  invalid specs, and leader election. `deploy/website.yaml` runs it with
-  cluster-scoped least-privilege RBAC.
+  invalid specs, and leader election. It uses `Kube.control` with the
+  generation predicate, so its own status writes don't wake it.
+  `deploy/website.yaml` runs it with cluster-scoped least-privilege RBAC.
+- `examples/bundle.bend` reads from its caches and follows a reference. A
+  labeled ConfigMap names a Secret in `data.secret`, and the controller
+  keeps an owned ConfigMap listing that Secret's key names. Secrets are an
+  `RRef` watch, so a change to the Secret reconciles the ConfigMap. The
+  Secret is read from the cache, and the outputs are counted with
+  `X.Ctx.children`.
 - `examples/pool_bench.bend` measures pooled against fresh connections.
 - `examples/smoke.bend` makes one-shot client calls.
 - **JS lane:** controllers also run with `bend file.bend`, no native build.
@@ -338,7 +543,7 @@ Publishing needs the `BENDAI_KEY` repository secret: the `key` field of
 ## Verified on a live cluster
 
 All of this ran against k0s v1.36 (arm64), both from a laptop and
-in-cluster:
+in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
 
 - **Auth and config:**
   - TLS with client certificates, service-account tokens, and an exec
@@ -363,9 +568,53 @@ in-cluster:
   - the typed Website operator, both from a laptop and in-cluster, and on
     the JS lane;
   - two controllers sharing one watch;
-  - the 2,029-object sync.
+  - the 20,018-object sync in 2.6s;
+  - a Secret change reconciling the bundles that reference it, read from
+    the cache;
+  - the Website operator settling after Ready: no reconciles from its own
+    status writes over 20s, and a spec change reconciling again;
+  - SIGTERM waiting for a running reconcile, then exiting 0, with and
+    without leader election (the Lease is released after the drain);
+  - the rate limit: 13 requests at 4 qps with a burst of 2 took 2.77s.
+  - two replicas: one leader, the standby waiting, and SIGTERM handing
+    the Lease to the standby within seconds (also in `tests/e2e.sh`).
 
 ## Scope
+
+- **Memory.** Bend strings are lists of characters, so a cached object
+  takes many times its JSON size: a 0.6 KB ConfigMap takes about 10 KB.
+  That came to 204 MB RSS for 20,000 of them. Size memory limits by the objects a controller caches,
+  and narrow its watches with namespaces (`C.InNs`) and label selectors
+  (`X.Spec.label`, `X.Spec.watches_where`).
+- **Relist peak.** A relist builds the new cache beside the old one and
+  swaps it in whole, so for a moment the process holds about twice the
+  cache.
+- **Writes need a namespace.** A write goes to the namespace its `C.Api`
+  names. Build `C.Api{res, C.InNs{ns}}` from the object, because an
+  `AllNs` api has no namespace in its path.
+- **Finalizer RBAC.** Finalizers are written with JSON patches, so a
+  controller using them needs `patch` on its primary.
+- **Relations scan.** `RRef` and `RAll` look through the primary's cache
+  for each related event, and `X.Ctx.children` looks through a related
+  cache. That is linear in the cache's size, which is fine for thousands of
+  objects.
+
+- **Webhooks.** There is no HTTPS server, so no admission or conversion
+  webhooks.
+  - Validate with CRD schemas, CEL rules (`x-kubernetes-validations`) and
+    `ValidatingAdmissionPolicy`.
+  - Terminate TLS in a sidecar if a webhook is needed.
+- **Watch shaping.** Predicates apply to the primary only; related watches
+  trigger on every change. Relations are the four kinds above; there is no
+  arbitrary mapper function.
+- **Resync.** There is no periodic resync of every object. A reconcile asks
+  for its next look with `Requeue{ms}`.
+- **One cluster per process.** All controllers of a process share one
+  config. `Kube.control_with` picks which cluster.
+- **Plain HTTP.** The client speaks only TLS to the API server; it isn't a
+  general HTTP client for external systems.
+- **Typed patches.** Generated encoders omit absent fields, so a merge
+  patch can't clear one; send `null` by hand when a field must go.
 
 These are choices, matching kube-rs's defaults:
 
@@ -409,5 +658,7 @@ Boundaries:
   null, booleans, and numbers (`-5`, `0.5`, `1e3`, written as JSON writes
   them; `0x1F` and `.inf` stay strings). It doesn't support complex keys
   (`? `) or anchors on inline `- key:` maps.
-- **Fuel.** Loops count down fuel of 4,294,967,295 steps so they terminate
-  by structure; at a few steps a second that is years.
+- **Fuel.** Long-running loops count down a nested fuel of 2^64 steps, so
+  they terminate by structure. At a million steps a second that is longer
+  than any process lives. A loop that ran out would exit the process
+  rather than sit idle.

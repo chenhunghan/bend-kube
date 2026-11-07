@@ -111,6 +111,8 @@ for lane in native js; do
   want $lane "verified server" '^ok HTTP/1.0 200' 127.0.0.1 24401
   want $lane "unknown CA rejected" 'server certificate rejected' 127.0.0.1 24401 "$OTHER"
   want $lane "wrong name rejected" 'server certificate rejected' 127.0.0.1 24402
+  want $lane "tls-server-name verifies instead of the host" '^ok HTTP/1.0 200' 127.0.0.1 24401 "PROBE_SERVER_NAME=bend.test"
+  want $lane "tls-server-name must match" 'server certificate rejected' 127.0.0.1 24401 "PROBE_SERVER_NAME=other.test"
   want $lane "expired certificate rejected" 'server certificate rejected' 127.0.0.1 24403
   want $lane "TLS 1.1 refused" '^error: TLS' 127.0.0.1 24404
   want $lane "missing client certificate refused" '^error' 127.0.0.1 24405

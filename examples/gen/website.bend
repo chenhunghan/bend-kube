@@ -45,25 +45,53 @@ def WebsiteSpec.to(t: WebsiteSpec) -> J.Json:
         T.Ty.put_opt(~U32, ~T.Ty.from_u32, "port", v2),
         T.Ty.put_list(~WebsiteSpecEnvItem, ~WebsiteSpecEnvItem.to, "env", v3)])
 
+type WebsiteStatusConditionsItem is Data:
+  WebsiteStatusConditionsItem{f_type: String, status: String, reason: Maybe<&2, String>, message: Maybe<&2, String>, observedGeneration: Maybe<&2, String>, lastTransitionTime: Maybe<&2, String>}
+
+def WebsiteStatusConditionsItem.of.go(+j: J.Json, +path: String) -> Result<&2, &2, String, WebsiteStatusConditionsItem>:
+  do Result<&2, &2, String, WebsiteStatusConditionsItem>:
+    v0 : String <- T.Ty.req(~String, ~T.Ty.str, j, "type", path)
+    v1 : String <- T.Ty.req(~String, ~T.Ty.str, j, "status", path)
+    v2 : Maybe<&2, String> <- T.Ty.opt(~String, ~T.Ty.str, j, "reason", path)
+    v3 : Maybe<&2, String> <- T.Ty.opt(~String, ~T.Ty.str, j, "message", path)
+    v4 : Maybe<&2, String> <- T.Ty.opt(~String, ~T.Ty.num, j, "observedGeneration", path)
+    v5 : Maybe<&2, String> <- T.Ty.opt(~String, ~T.Ty.str, j, "lastTransitionTime", path)
+    return WebsiteStatusConditionsItem{v0, v1, v2, v3, v4, v5}
+
+def WebsiteStatusConditionsItem.of(j: J.Json, path: String) -> Result<&2, &2, String, WebsiteStatusConditionsItem>:
+  WebsiteStatusConditionsItem.of.go(j, path)
+
+def WebsiteStatusConditionsItem.to(t: WebsiteStatusConditionsItem) -> J.Json:
+  match t:
+    case WebsiteStatusConditionsItem{v0, v1, v2, v3, v4, v5}:
+      T.Ty.obj([T.Ty.put(~String, ~T.Ty.from_str, "type", v0),
+        T.Ty.put(~String, ~T.Ty.from_str, "status", v1),
+        T.Ty.put_opt(~String, ~T.Ty.from_str, "reason", v2),
+        T.Ty.put_opt(~String, ~T.Ty.from_str, "message", v3),
+        T.Ty.put_opt(~String, ~T.Ty.from_num, "observedGeneration", v4),
+        T.Ty.put_opt(~String, ~T.Ty.from_str, "lastTransitionTime", v5)])
+
 type WebsiteStatus is Data:
-  WebsiteStatus{phase: Maybe<&2, String>, readyReplicas: Maybe<&2, U32>, observedGeneration: Maybe<&2, String>}
+  WebsiteStatus{phase: Maybe<&2, String>, readyReplicas: Maybe<&2, U32>, observedGeneration: Maybe<&2, String>, conditions: List<&2, WebsiteStatusConditionsItem>}
 
 def WebsiteStatus.of.go(+j: J.Json, +path: String) -> Result<&2, &2, String, WebsiteStatus>:
   do Result<&2, &2, String, WebsiteStatus>:
     v0 : Maybe<&2, String> <- T.Ty.opt(~String, ~T.Ty.str, j, "phase", path)
     v1 : Maybe<&2, U32> <- T.Ty.opt(~U32, ~T.Ty.u32, j, "readyReplicas", path)
     v2 : Maybe<&2, String> <- T.Ty.opt(~String, ~T.Ty.num, j, "observedGeneration", path)
-    return WebsiteStatus{v0, v1, v2}
+    v3 : List<&2, WebsiteStatusConditionsItem> <- T.Ty.list(~WebsiteStatusConditionsItem, ~WebsiteStatusConditionsItem.of, j, "conditions", path)
+    return WebsiteStatus{v0, v1, v2, v3}
 
 def WebsiteStatus.of(j: J.Json, path: String) -> Result<&2, &2, String, WebsiteStatus>:
   WebsiteStatus.of.go(j, path)
 
 def WebsiteStatus.to(t: WebsiteStatus) -> J.Json:
   match t:
-    case WebsiteStatus{v0, v1, v2}:
+    case WebsiteStatus{v0, v1, v2, v3}:
       T.Ty.obj([T.Ty.put_opt(~String, ~T.Ty.from_str, "phase", v0),
         T.Ty.put_opt(~U32, ~T.Ty.from_u32, "readyReplicas", v1),
-        T.Ty.put_opt(~String, ~T.Ty.from_num, "observedGeneration", v2)])
+        T.Ty.put_opt(~String, ~T.Ty.from_num, "observedGeneration", v2),
+        T.Ty.put_list(~WebsiteStatusConditionsItem, ~WebsiteStatusConditionsItem.to, "conditions", v3)])
 
 # The Website resource, with typed spec and status; metadata stays JSON.
 type Website is Data:
