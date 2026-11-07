@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/chenhunghan/bend-kube/compare/v0.2.0...v0.3.0) (2026-11-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* Opts gained grace, qps and burst fields, so code that builds Opts{..} directly must use Opts.default() and the with_ helpers. K.Config gained a limit field.
+
+### Features
+
+* production-ready controllers and operators ([#5](https://github.com/chenhunghan/bend-kube/issues/5)) ([46744f9](https://github.com/chenhunghan/bend-kube/commit/46744f95f00ad2ca7a114c5e390c37118214bdf5))
+
 ## [0.2.0](https://github.com/chenhunghan/bend-kube/compare/v0.1.2...v0.2.0) (2026-10-29)
 
 
