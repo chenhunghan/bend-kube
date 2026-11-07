@@ -454,9 +454,11 @@ def Req.idempotent.go(m: String) -> Bool:
       True{}
     case "PUT":
       True{}
-    case "DELETE":
-      True{}
     case _:
+      # DELETE is not replayed: if the first one landed and the name was
+      # recreated, a replay would delete the replacement. The caller sees
+      # the failure and reconciles (Client.delete_with can add a uid
+      # precondition).
       False{}
 
 def Req.idempotent(r: H.Req) -> Bool:

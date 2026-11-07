@@ -1297,48 +1297,60 @@ def Manager.loops(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, cs: Lis
 # Runs every controller on its inbox (Manager.inboxes), sharing their
 # watches. rec(obj, ctx) reconciles obj; X.Ctx.idx(ctx) names the
 # controller.
-def Manager.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
-  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +started: Chan(Unit)) ->
-  IO(Unit):
-  IO.bind(Poll<&1, &1, Result<&1, &1, Unit, Unit>, Unit>, Unit, Chan.try_send(Unit, started, Unit{}, 0),
-    u0 => IO.bind(Unit, Unit, Manager.watch(cfg, Plan.build(cs, chs, Nil{})),
-      u => Manager.loops(~rec, cfg, cs, chs, status, meter, 0)))
+def Manager.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
+  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter),
+  p: Poll<&1, &1, Maybe<&1, Unit>, Unit>) -> IO(Unit):
+  match p:
+    case Ready{Some{u}}:
+      IO.bind(Unit, Unit, Manager.watch(cfg, Plan.build(cs, chs, Nil{})),
+        u2 => Manager.loops(~rec, cfg, cs, chs, status, meter, 0))
+    case _:
+      L.Log.info("shutting down; controllers not started", Nil{})
 
-# A channel that holds a token once the controllers have started (on a
-# leader, once it leads), so shutdown knows whether there is anything to
-# drain.
-def Manager.started() -> IO(Chan(Unit)):
-  Chan.new(Unit, 1)
+# Runs every controller on its inbox (Manager.inboxes), sharing their
+# watches, once it takes the start gate's token (Manager.gate): shutdown
+# takes it first when it comes first, and then nothing starts. rec(obj,
+# ctx) reconciles obj; X.Ctx.idx(ctx) names the controller.
+def Manager.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
+  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +gate: Chan(Unit)) ->
+  IO(Unit):
+  IO.bind(Poll<&1, &1, Maybe<&1, Unit>, Unit>, Unit, Chan.try_recv(Unit, gate, 0),
+    p => Manager.start.go(~rec, cfg, cs, chs, status, meter, p))
+
+# The start gate: one token, taken by whichever comes first, the
+# controllers starting (Manager.start) or shutdown (Manager.stop). So
+# shutdown either knows they run and drains them, or keeps them from ever
+# starting.
+def Manager.gate() -> IO(Chan(Unit)):
+  IO.bind(Chan(Unit), Chan(Unit), Chan.new(Unit, 1),
+    +c => IO.bind(Poll<&1, &1, Result<&1, &1, Unit, Unit>, Unit>, Chan(Unit),
+      Chan.try_send(Unit, c, Unit{}, 0), u => IO.pure(Chan(Unit), c)))
 
 # Stopping
 # --------
 
-def Stop.ask.sent(p: Poll<&1, &1, Result<&1, &1, Msg, Unit>, Msg>, +r: Chan(Unit)) -> Maybe<&2, Chan(Unit)>:
-  match p:
-    case Ready{Done{u}}:
-      Some{r}
-    case _:
-      None{}
+# The stop requests delivered, and whether every controller took one.
+type Asked is Data:
+  Asked{rs: List<&2, Chan(Unit)>, all: Bool}
 
-def Stop.ask.put(m: Maybe<&2, Chan(Unit)>, rest: List<&2, Chan(Unit)>) -> List<&2, Chan(Unit)>:
-  match m:
-    case Some{r}:
-      r <> rest
-    case None{}:
-      rest
+def Stop.ask.put(p: Poll<&1, &1, Result<&1, &1, Msg, Unit>, Msg>, +r: Chan(Unit), a: Asked) -> Asked:
+  match p a:
+    case Ready{Done{u}} Asked{rs, all}:
+      Asked{r <> rs, all}
+    case _ Asked{rs, all}:
+      Asked{rs, False{}}
 
-# Asks each controller to stop; a controller whose inbox does not take the
-# request within a second is not waited for.
-def Stop.ask(chs: List<&2, Chan(Msg)>) -> IO(List<&2, Chan(Unit)>):
+# Asks each controller to stop; one whose inbox does not take the request
+# within a second makes the drain unclean (its reconciles may go on).
+def Stop.ask(chs: List<&2, Chan(Msg)>) -> IO(Asked):
   match chs:
     case Nil{}:
-      IO.pure(List<&2, Chan(Unit)>, Nil{})
+      IO.pure(Asked, Asked{Nil{}, True{}})
     case Con{ch, t}:
-      IO.bind(Chan(Unit), List<&2, Chan(Unit)>, Chan.new(Unit, 1),
-        +r => IO.bind(Poll<&1, &1, Result<&1, &1, Msg, Unit>, Msg>, List<&2, Chan(Unit)>,
+      IO.bind(Chan(Unit), Asked, Chan.new(Unit, 1),
+        +r => IO.bind(Poll<&1, &1, Result<&1, &1, Msg, Unit>, Msg>, Asked,
           Chan.try_send(Msg, ch, MStop{r}, 1000),
-          p => IO.bind(List<&2, Chan(Unit)>, List<&2, Chan(Unit)>, Stop.ask(t),
-            rest => IO.pure(List<&2, Chan(Unit)>, Stop.ask.put(Stop.ask.sent(p, r), rest)))))
+          p => IO.bind(Asked, Asked, Stop.ask(t), rest => IO.pure(Asked, Stop.ask.put(p, r, rest)))))
 
 def Stop.wait(rs: List<&2, Chan(Unit)>) -> IO(Unit):
   match rs:
@@ -1347,32 +1359,43 @@ def Stop.wait(rs: List<&2, Chan(Unit)>) -> IO(Unit):
     case Con{r, t}:
       IO.bind(Maybe<&1, Unit>, Unit, Chan.recv(Unit, r), u => Stop.wait(t))
 
-# Whether every controller finished its reconciles in time.
-def Stop.said(m: Maybe<&1, Unit>) -> IO(Bool):
+# Whether every controller took the stop request and finished in time.
+def Stop.said(m: Maybe<&1, Bool>) -> IO(Bool):
   match m:
-    case Some{u}:
+    case Some{True{}}:
       IO.bind(Unit, Bool, L.Log.info("reconciles drained", Nil{}), x => IO.pure(Bool, True{}))
+    case Some{False{}}:
+      IO.bind(Unit, Bool,
+        L.Log.warn("a controller did not take the stop request; exiting without releasing the lease", Nil{}),
+        x => IO.pure(Bool, False{}))
     case None{}:
       IO.bind(Unit, Bool,
         L.Log.warn("reconciles still running at the grace deadline; exiting without releasing the lease", Nil{}),
         x => IO.pure(Bool, False{}))
 
-def Stop.all(chs: List<&2, Chan(Msg)>) -> IO(Unit):
-  IO.bind(List<&2, Chan(Unit)>, Unit, Stop.ask(chs), rs => Stop.wait(rs))
+def Stop.all.of(a: Asked) -> IO(Bool):
+  match a:
+    case Asked{rs, all}:
+      IO.bind(Unit, Bool, Stop.wait(rs), u => IO.pure(Bool, all))
 
+def Stop.all(chs: List<&2, Chan(Msg)>) -> IO(Bool):
+  IO.bind(Asked, Bool, Stop.ask(chs), Stop.all.of)
+
+# p: shutdown's attempt to take the start gate's token. Taking it means no
+# controller started, nor ever will: nothing to drain. Otherwise they run.
 def Stop.drain(chs: List<&2, Chan(Msg)>, +grace: U32, p: Poll<&1, &1, Maybe<&1, Unit>, Unit>) -> IO(Bool):
   match p:
     case Ready{Some{u}}:
-      IO.bind(Unit, Bool, L.Log.info("draining reconciles", [L.Log.kv("grace_ms", U32.show(grace))]),
-        u2 => IO.bind(Maybe<&1, Unit>, Bool, IO.within(Unit, grace, Stop.all(chs)), Stop.said))
-    case _:
-      # a standby replica runs no controller
+      # no controller started (a standby replica), and none will now
       IO.pure(Bool, True{})
+    case _:
+      IO.bind(Unit, Bool, L.Log.info("draining reconciles", [L.Log.kv("grace_ms", U32.show(grace))]),
+        u2 => IO.bind(Maybe<&1, Bool>, Bool, IO.within(Bool, grace, Stop.all(chs)), Stop.said))
 
 # Asks every running controller to stop: no new reconciles start, and this
 # returns once the running ones finish, or after grace ms. Nothing to do
 # when the controllers never started (a standby replica). Answers whether
 # nothing is left running.
-def Manager.stop(chs: List<&2, Chan(Msg)>, +started: Chan(Unit), +grace: U32) -> IO(Bool):
-  IO.bind(Poll<&1, &1, Maybe<&1, Unit>, Unit>, Bool, Chan.try_recv(Unit, started, 0),
+def Manager.stop(chs: List<&2, Chan(Msg)>, +gate: Chan(Unit), +grace: U32) -> IO(Bool):
+  IO.bind(Poll<&1, &1, Maybe<&1, Unit>, Unit>, Bool, Chan.try_recv(Unit, gate, 0),
     p => Stop.drain(chs, grace, p))

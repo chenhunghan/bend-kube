@@ -156,13 +156,13 @@ def Kube.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +ecfg: K.C
     case Opts{m, +p, l, sel, +grace, q, b}:
       IO.bind(List<&2, Chan(R.Msg)>, Unit, R.Manager.inboxes(List.length(&2, X.Spec, specs)),
         +chs => IO.bind(Chan(R.SMsg), Unit, R.Keeper.start(),
-          +status => IO.bind(Chan(Unit), Unit, R.Manager.started(),
-            +started => IO.bind(Chan(X.Meter), Unit, R.Meter.start(), +meter => IO.bind(Unit, Unit, Kube.serve(p, status, meter),
+          +status => IO.bind(Chan(Unit), Unit, R.Manager.gate(),
+            +gate => IO.bind(Chan(X.Meter), Unit, R.Meter.start(), +meter => IO.bind(Unit, Unit, Kube.serve(p, status, meter),
               u => IO.bind(Unit, Unit, L.Log.info("starting controllers",
                 [L.Log.kv("count", Nat.show(List.length(&2, X.Spec, specs))),
                   L.Log.kv("server", K.Config.host(cfg))]),
-                u2 => Kube.elect(ecfg, l, R.Manager.stop(chs, started, grace),
-                  R.Manager.start(~rec, cfg, specs, chs, status, meter, started))))))))
+                u2 => Kube.elect(ecfg, l, R.Manager.stop(chs, gate, grace),
+                  R.Manager.start(~rec, cfg, specs, chs, status, meter, gate))))))))
 
 # Up to 8 idle keep-alive connections shared by every request.
 def Kube.pool() -> IO(Chan(Socket)):

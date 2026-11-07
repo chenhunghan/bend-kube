@@ -313,8 +313,9 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   ended, without `Connection: close`.
 - A stale pooled connection is retried once on a fresh one, by Go's
   transport rule: retry when the request was not written, or when no
-  response byte came and the method is idempotent. A law states this
-  rule.
+  response byte came and the method is GET, HEAD or PUT. A law states this
+  rule. Unlike Go, a DELETE is never replayed: if the first one landed and
+  the name was recreated, a replay would delete the replacement.
 - 50 sequential GETs take 32ms pooled against 240ms with fresh
   connections.
 - Watches hold their own connection.
