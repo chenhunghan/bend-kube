@@ -259,7 +259,10 @@ deadline):
 - Each Lease read and write is bounded by what is left of the renew
   deadline. Lateness is judged by the clock after the calls return, so a
   hung write cannot keep a stale leader running. A renewal that lands only
-  after the deadline also counts as lost, as in client-go.
+  after the deadline also counts as lost, as in client-go. After a failed
+  try, a leader waits at most what is left of its deadline, and checks the
+  deadline before every request. So it stops once the deadline is reached,
+  whatever the retry period.
 - A Lease is observed when its read returns, and another holder's Lease
   lasts its own `leaseDurationSeconds`, so a slow read or a contender
   configured with a shorter duration can't expire a live leader.
@@ -432,7 +435,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 59 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 61 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -481,7 +484,8 @@ loop.
   - our own Lease is renewed, and a released one is free.
   - another holder's Lease lasts its own recorded duration;
   - the default timing is accepted, and a lease no longer than its renew
-    deadline is refused.
+    deadline is refused;
+  - a leader is late once its deadline is reached, and never naps past it.
 - **Finalizer cleanup:** a failed or held cleanup keeps the finalizer, and
   a finished one releases it.
 - **Conditions:** setting a condition with an unchanged status keeps its
@@ -638,7 +642,9 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
   webhooks.
   - Validate with CRD schemas, CEL rules (`x-kubernetes-validations`) and
     `ValidatingAdmissionPolicy`.
-  - Terminate TLS in a sidecar if a webhook is needed.
+  - An operator that needs admission or conversion webhooks runs them as a
+    separate service. A TLS sidecar alone is not enough: the webhook
+    protocol (AdmissionReview, ConversionReview) must be served too.
 - **Watch shaping.** Predicates apply to the primary only; related watches
   trigger on every change. Relations are the four kinds above; there is no
   arbitrary mapper function.
@@ -666,8 +672,10 @@ Boundaries:
   must run in constant time, which Bend's evaluator cannot promise.
   Signals need `sigaction`, which only C can call. What stays foreign is
   kept small:
-  - `src/effs/tls.c` promises: `Tls.dial` connects (DNS, IPv4 or IPv6)
-    within its deadline; `Tls.secure` handshakes with TLS 1.2 or later and
+  - `src/effs/tls.c` promises: `Tls.dial` connects (IPv4 or IPv6) within
+    its deadline for each address it tries, after resolving the name (DNS
+    resolution itself is the system's and is not bounded by that deadline;
+    an in-cluster config dials an IP); `Tls.secure` handshakes with TLS 1.2 or later and
     succeeds only if the server's chain verifies against the given roots
     (or the system's) and its certificate names the host (or IP); `Tls.send`
     and `Tls.recv` move bytes, an empty read being the end; a failed

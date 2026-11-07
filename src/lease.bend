@@ -181,10 +181,58 @@ def Lease.timing.go(zero: Bool, short: Bool, tight: Bool) -> Maybe<&2, String>:
     case False{} False{} False{}:
       None{}
 
+# Settings over a day are refused before any arithmetic, which then cannot
+# overflow.
+def Lease.timing.big(+dur: U32, +deadline: U32, +retry: U32, big: Bool) -> Maybe<&2, String>:
+  match big:
+    case True{}:
+      Some{"leader election: lease duration, renew deadline and retry period must each be at most a day"}
+    case False{}:
+      Lease.timing.go(Bool.or(Bool.or(U32.is_eq(dur, 0), U32.is_eq(deadline, 0)), U32.is_eq(retry, 0)),
+        U32.is_le((dur * 1000 : U32), deadline), U32.is_le((deadline * 10 : U32), (retry * 12 : U32)))
+
 # Election timing that keeps two leaders from acting at once, as
 # client-go's NewLeaderElector checks it: every setting above zero, the
 # lease (dur, seconds) longer than the renew deadline (ms), and the
 # deadline longer than 1.2 retry periods (ms). The fault, if any.
 def Lease.timing(+dur: U32, +deadline: U32, +retry: U32) -> Maybe<&2, String>:
-  Lease.timing.go(Bool.or(Bool.or(U32.is_eq(dur, 0), U32.is_eq(deadline, 0)), U32.is_eq(retry, 0)),
-    U32.is_le((dur * 1000 : U32), deadline), U32.is_le((deadline * 10 : U32), (retry * 12 : U32)))
+  Lease.timing.big(dur, deadline, retry,
+    Bool.or(Bool.or(U32.is_gt(dur, 86400), U32.is_gt(deadline, 86400000)), U32.is_gt(retry, 86400000)))
+
+def Lease.room.left(+deadline: U32, +spent: U32, left: Bool) -> U32:
+  match left:
+    case True{}:
+      (deadline - spent : U32)
+    case False{}:
+      1
+
+def Lease.room.go(+deadline: U32, +spent: U32) -> U32:
+  Lease.room.left(deadline, spent, U32.is_lt(spent, deadline))
+
+# How long a lease call may take: while leading, what is left of the renew
+# deadline since the last renewal (at least 1ms); else the whole deadline.
+
+def Lease.room(+now: U32, +last: U32, +deadline: U32, leading: Bool) -> U32:
+  match leading:
+    case True{}:
+      Lease.room.go(deadline, (now - last : U32))
+    case False{}:
+      deadline
+
+# Renewal timing (the leader loop, leader.bend)
+# ----------------------------------------------
+
+# How long to wait before the next try: the retry period, but for a
+# leader never past its renew deadline, so it notices the deadline in time
+# (the loop checks it before every request).
+def Lease.nap(+now: U32, +last: U32, +deadline: U32, +retry: U32, leading: Bool) -> U32:
+  match leading:
+    case True{}:
+      U32.min(retry, Lease.room(now, last, deadline, True{}))
+    case False{}:
+      retry
+
+# Whether the renew deadline has passed since the last renewal (reaching it
+# counts: a standby may act from then on).
+def Lease.late(+now: U32, +last: U32, +deadline: U32) -> Bool:
+  U32.is_ge((now - last : U32), deadline)

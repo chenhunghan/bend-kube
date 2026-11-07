@@ -218,3 +218,9 @@ def Laws.lease_default_timing_ok():
 
 def Laws.lease_short_lease_refused():
   {==}
+
+def Laws.leader_late_at_deadline():
+  {==}
+
+def Laws.leader_nap_bounded():
+  {==}
