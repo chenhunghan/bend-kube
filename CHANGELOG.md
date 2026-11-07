@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/chenhunghan/bend-kube/compare/v0.5.1...v0.5.2) (2026-11-07)
+
+
+### Bug Fixes
+
+* a leader never sleeps past its renew deadline ([#13](https://github.com/chenhunghan/bend-kube/issues/13)) ([3f0f3db](https://github.com/chenhunghan/bend-kube/commit/3f0f3db5c862a40f8d815a547444fe7c1671637c))
+
 ## [0.5.1](https://github.com/chenhunghan/bend-kube/compare/v0.5.0...v0.5.1) (2026-11-07)
 
 
