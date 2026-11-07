@@ -375,7 +375,8 @@ type CState is Data:
     stop: Maybe<&2, Chan(Unit)>, tim: Tim}
 
 type CCtx is Data:
-  CCtx{cfg: K.Config, spec: X.Spec, chan: Chan(Msg), status: Chan(SMsg), idx: U32}
+  CCtx{cfg: K.Config, spec: X.Spec, chan: Chan(Msg), status: Chan(SMsg), idx: U32,
+    meter: Chan(X.Meter)}
 
 # A reconcile to start: the key and the object the store holds for it.
 type Job is Data:
@@ -796,18 +797,23 @@ def Ctl.snap(st: CState, name: String) -> Snap:
 
 def CCtx.status(c: CCtx) -> Chan(SMsg):
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       st
 
 def CCtx.idx(c: CCtx) -> U32:
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       ix
 
 def CCtx.spec(c: CCtx) -> X.Spec:
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       sp
+
+def CCtx.meter(c: CCtx) -> Chan(X.Meter):
+  match c:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
+      mt
 
 def CCtx.kind(c: CCtx) -> String:
   X.Spec.kind(CCtx.spec(c))
@@ -829,7 +835,7 @@ def Ctl.publish(+st: CState, +ctx: CCtx, due: Bool) -> IO(CState):
 
 def CCtx.chan(c: CCtx) -> Chan(Msg):
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       ch
 
 # At idle: publish, or arm the tick, then wait for the next message.
@@ -877,14 +883,14 @@ def Ctl.sleeps(ss: List<&2, Sleep>, +chan: Chan(Msg)) -> IO(Unit):
 
 def CCtx.cfg(c: CCtx) -> K.Config:
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       cfg
 
 # What a reconcile sees: the config, the controller's index and the caches.
 def Ctl.ctx(st: CState, +c: CCtx) -> X.Ctx:
   match st:
     case CState{s, cs, q, x, p, tm}:
-      X.Ctx{CCtx.cfg(c), CCtx.idx(c), s, cs, 0}
+      X.Ctx{CCtx.cfg(c), CCtx.idx(c), s, cs, 0, Some{CCtx.meter(c)}}
 
 def Ctl.report(+key: String, +kind: String, a: Q.Action) -> IO(Unit):
   match a:
@@ -1041,17 +1047,96 @@ def Keeper.start() -> IO(Chan(SMsg)):
         x => Keeper.run(4294967295n, 4294967295n, x, Map.new(&2, Snap), c))), u => IO.pure(Chan(SMsg), c)))
 
 def Ctl.loop(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +spec: X.Spec,
-  +chan: Chan(Msg), +status: Chan(SMsg), +idx: U32) -> IO(Unit):
+  +chan: Chan(Msg), +status: Chan(SMsg), +meter: Chan(X.Meter), +idx: U32) -> IO(Unit):
   Ctl.run(~rec, 4294967295n, 4294967295n,
     CDisp{(CState{S.Store.new(),
       List.replicate(S.Store, List.length(&2, X.Sec, X.Spec.secs(spec)), S.Store.new()),
       Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}}, None{}, Tim.new()}, Nil{})},
     CState{S.Store.new(), Nil{}, Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}},
       None{}, Tim.new()},
-    CCtx{cfg, spec, chan, status, idx})
+    CCtx{cfg, spec, chan, status, idx, meter})
 
 def Controller.inbox() -> IO(Chan(Msg)):
   Chan.new(Msg, 4096)
+
+# Meter
+# -----
+#
+# The metrics controllers define (X.Meter): counters and gauges by name and
+# labels, held by one computation and rendered for /metrics.
+
+def Meter.key(+name: String, +labels: String, none: Bool) -> String:
+  match none:
+    case True{}:
+      name
+    case False{}:
+      name ++ "{" ++ labels ++ "}"
+
+def Meter.kind(k: U32) -> String:
+  match k:
+    case 0:
+      "counter"
+    case _:
+      "gauge"
+
+def Meter.sample(+k: String, mine: Bool, +vals: Map<&2, U32>) -> String:
+  match mine:
+    case True{}:
+      k ++ " " ++ U32.show(Q.Mp.get(vals, k)) ++ "\n"
+    case False{}:
+      ""
+
+def Meter.samples(ks: List<&2, String>, +name: String, +vals: Map<&2, U32>) -> String:
+  match ks:
+    case Nil{}:
+      ""
+    case Con{+k, t}:
+      Meter.sample(k, Bool.or(String.eq(k, name), String.starts_with(k, name ++ "{")), vals)
+        ++ Meter.samples(t, name, vals)
+
+def Meter.render.go(ns: List<&2, String>, +vals: Map<&2, U32>, +kinds: Map<&2, U32>) -> String:
+  match ns:
+    case Nil{}:
+      ""
+    case Con{+n, t}:
+      "# TYPE " ++ n ++ " " ++ Meter.kind(Q.Mp.get(kinds, n)) ++ "\n"
+        ++ Meter.samples(Map.keys(&2, U32, vals), n, vals) ++ Meter.render.go(t, vals, kinds)
+
+# Every series, family by family, in the Prometheus text format.
+def Meter.render(+vals: Map<&2, U32>, +kinds: Map<&2, U32>) -> String:
+  Meter.render.go(Map.keys(&2, U32, kinds), vals, kinds)
+
+def Meter.run(outer: Nat, fuel: Nat, m: Maybe<&1, X.Meter>, +vals: Map<&2, U32>, +kinds: Map<&2, U32>,
+  +inbox: Chan(X.Meter)) -> IO(Unit):
+  match outer fuel m:
+    case 0n 0n x:
+      Loop.spent("Meter.run")
+    case 1n+o 0n x:
+      Meter.run(o, 4294967295n, x, vals, kinds, inbox)
+    case o 1n+f None{}:
+      IO.pure(Unit, Unit{})
+    case o 1n+f Some{X.MAdd{+n, +l, +k}}:
+      IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, inbox),
+        x => Meter.run(o, f, x,
+          Map.set(&2, U32, vals, Meter.key(n, l, String.is_empty(l)),
+            (Q.Mp.get(vals, Meter.key(n, l, String.is_empty(l))) + k : U32)),
+          Map.set(&2, U32, kinds, n, 0), inbox))
+    case o 1n+f Some{X.MSet{+n, +l, v}}:
+      IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, inbox),
+        x => Meter.run(o, f, x, Map.set(&2, U32, vals, Meter.key(n, l, String.is_empty(l)), v),
+          Map.set(&2, U32, kinds, n, 1), inbox))
+    case o 1n+f Some{X.MRead{r}}:
+      IO.bind(Result<&1, &1, String, Unit>, Unit, Chan.send(String, r, Meter.render(vals, kinds)),
+        u => IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, inbox),
+          x => Meter.run(o, f, x, vals, kinds, inbox)))
+
+# Starts the meter; answers its inbox.
+def Meter.start() -> IO(Chan(X.Meter)):
+  IO.bind(Chan(X.Meter), Chan(X.Meter), Chan.new(X.Meter, 4096),
+    +c => IO.bind(Unit, Chan(X.Meter), IO.spawn(Unit,
+      IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, c),
+        x => Meter.run(4294967295n, 4294967295n, x, Map.new(&2, U32), Map.new(&2, U32), c))),
+      u => IO.pure(Chan(X.Meter), c)))
 
 # Manager
 # -------
@@ -1148,11 +1233,11 @@ def Manager.watch(+cfg: K.Config, ws: List<&2, Watch>) -> IO(Unit):
       IO.bind(Unit, Unit, Ctl.watch.subs(cfg, a, l, fs, ss), u => Manager.watch(cfg, t))
 
 def Manager.loops(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, cs: List<&2, X.Spec>,
-  chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +i: U32) -> IO(Unit):
+  chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +i: U32) -> IO(Unit):
   match cs chs:
     case Con{s, t} Con{ch, ct}:
-      IO.bind(Unit, Unit, IO.spawn(Unit, Ctl.loop(~rec, cfg, s, ch, status, i)),
-        u => Manager.loops(~rec, cfg, t, ct, status, (i + 1 : U32)))
+      IO.bind(Unit, Unit, IO.spawn(Unit, Ctl.loop(~rec, cfg, s, ch, status, meter, i)),
+        u => Manager.loops(~rec, cfg, t, ct, status, meter, (i + 1 : U32)))
     case _ _:
       IO.pure(Unit, Unit{})
 
@@ -1160,10 +1245,11 @@ def Manager.loops(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, cs: Lis
 # watches. rec(obj, ctx) reconciles obj; X.Ctx.idx(ctx) names the
 # controller.
 def Manager.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
-  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +started: Chan(Unit)) -> IO(Unit):
+  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +started: Chan(Unit)) ->
+  IO(Unit):
   IO.bind(Poll<&1, &1, Result<&1, &1, Unit, Unit>, Unit>, Unit, Chan.try_send(Unit, started, Unit{}, 0),
     u0 => IO.bind(Unit, Unit, Manager.watch(cfg, Plan.build(cs, chs, Nil{})),
-      u => Manager.loops(~rec, cfg, cs, chs, status, 0)))
+      u => Manager.loops(~rec, cfg, cs, chs, status, meter, 0)))
 
 # A channel that holds a token once the controllers have started (on a
 # leader, once it leads), so shutdown knows whether there is anything to

@@ -501,6 +501,17 @@ def Out.trim_all(+fs: List<&2, String>, os: List<&2, W.Out>) -> List<&2, W.Out>:
     case Con{o, t}:
       Out.trim(fs, o) <> Out.trim_all(fs, t)
 
+# Metrics a controller defines
+# ----------------------------
+
+# What a reconcile tells the meter: add n to a counter, set a gauge, or (the
+# health server) ask for every series in the Prometheus text format.
+# labels is the inside of the braces, as `kind="x",phase="y"` ("" for none).
+type Meter is Data:
+  MAdd{name: String, labels: String, n: U32}
+  MSet{name: String, labels: String, v: U32}
+  MRead{reply: Chan(String)}
+
 # The reconcile context
 # ---------------------
 
@@ -508,33 +519,40 @@ def Out.trim_all(+fs: List<&2, String>, os: List<&2, W.Out>) -> List<&2, W.Out>:
 # controller); store: the primary's cache; caches: each related watch's,
 # in the order they were added (Ctx.cache(c, 1) is the first); fails: how
 # many times in a row this key's reconcile has failed (0 after a success),
-# so a reconcile can escalate or give up.
+# so a reconcile can escalate or give up; meter: where the controller's own
+# metrics go (Metrics.add, Metrics.set), None outside Kube.control.
 type Ctx is Data:
-  Ctx{cfg: K.Config, idx: U32, store: S.Store, caches: List<&2, S.Store>, fails: U32}
+  Ctx{cfg: K.Config, idx: U32, store: S.Store, caches: List<&2, S.Store>, fails: U32,
+    meter: Maybe<&2, Chan(Meter)>}
 
 def Ctx.cfg(c: Ctx) -> K.Config:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       cfg
 
 def Ctx.idx(c: Ctx) -> U32:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       i
 
 def Ctx.store(c: Ctx) -> S.Store:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       s
 
 def Ctx.with_fails(c: Ctx, n: U32) -> Ctx:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
-      Ctx{cfg, i, s, cs, n}
+    case Ctx{cfg, i, s, cs, fl, mt}:
+      Ctx{cfg, i, s, cs, n, mt}
+
+def Ctx.meter(c: Ctx) -> Maybe<&2, Chan(Meter)>:
+  match c:
+    case Ctx{cfg, i, s, cs, fl, mt}:
+      mt
 
 def Ctx.fails(c: Ctx) -> U32:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       fl
 
 # The cached primary under a key ("ns/name", or "name").
@@ -557,7 +575,7 @@ def Ctx.nth(cs: List<&2, S.Store>, n: Nat) -> S.Store:
 # The cache of the n-th related watch (from 1); empty if there is none.
 def Ctx.cache(c: Ctx, n: U32) -> S.Store:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       Ctx.nth(cs, U32.to_nat((n - 1 : U32)))
 
 # A cached related object under a key.

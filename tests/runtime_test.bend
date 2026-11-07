@@ -96,6 +96,8 @@ def action(a: Q.Action) -> String:
   match a:
     case Q.Retry{m}:
       "Retry " ++ m
+    case Q.RetryIn{m, ms}:
+      "RetryIn " ++ U32.show(ms) ++ "ms: " ++ m
     case Q.Requeue{ms}:
       "Requeue " ++ U32.show(ms)
     case _:
@@ -112,6 +114,17 @@ def tokens.go(n: Nat, +qps: U32, +every: U32, +burst: U32, +carry: U32, +acc: U3
 
 def tokens(+qps: U32, +burst: U32) -> String:
   U32.show(tokens.go(U32.to_nat((1000 / Cl.Limit.every(qps) : U32)), qps, Cl.Limit.every(qps), burst, 0, 0))
+
+# The action a failed call suggests, from a reply's status and body.
+def failed.of(r: Result<&2, &2, Cl.KErr, J.Json>) -> String:
+  match r:
+    case Fail{+e}:
+      action(Cl.KErr.action(e))
+    case Done{x}:
+      "no error"
+
+def failed(+code: U32, body: String) -> String:
+  failed.of(Cl.Client.json.of(Done{Cl.Reply{code, body}}))
 
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
@@ -141,6 +154,12 @@ def main() -> IO(Unit):
     IO.print("watch cut mid-stream: " ++ end(H.Resp{H.PErr{"connection closed mid-response"}, None{}, Nil{}}))
     IO.print("watch closed before answering: " ++ end(H.Resp{H.PLost{"closed"}, None{}, Nil{}}))
     IO.print("reconcile finished in time: " ++ action(R.Ctl.timed_out(5000, Some{Q.Requeue{60000}})))
+    IO.print("own metrics:\n" ++ R.Meter.render(
+      Map.set(&2, U32, Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "syncs_total{b=\"a\"}", 3),
+        "syncs_total{b=\"c\"}", 1), "keys", 2),
+      Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "syncs_total", 0), "keys", 1)))
+    IO.print("a 429 naming its delay: " ++ failed(429, "{\"kind\": \"Status\", \"code\": 429, \"reason\": \"TooManyRequests\", \"message\": \"slow down\", \"details\": {\"retryAfterSeconds\": 7}}"))
+    IO.print("a 500 without one: " ++ failed(500, "{\"kind\": \"Status\", \"code\": 500, \"reason\": \"InternalError\", \"message\": \"boom\"}"))
     IO.print("reconcile timed out: " ++ action(R.Ctl.timed_out(5000, None{})))
     IO.print("tokens in the first second (a fraction carries over) at qps 1, 3, 7, 50, 75, 333, 1000: " ++ tokens(1, 100) ++ " "
       ++ tokens(3, 100) ++ " " ++ tokens(7, 100) ++ " " ++ tokens(50, 100) ++ " " ++ tokens(75, 100)

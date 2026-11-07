@@ -92,7 +92,7 @@ def fold_obj(f: X.Fold) -> J.Json:
 
 def ctx(+prim: S.Store, +rel: S.Store) -> X.Ctx:
   X.Ctx{K.Config{"h", 443, "", K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, "default", None{}, None{}, ""},
-    3, prim, [rel], 0}
+    3, prim, [rel], 0, None{}}
 
 def main() -> IO(Unit):
   # The first list fills the cache: everything reconciles, filtered or not.

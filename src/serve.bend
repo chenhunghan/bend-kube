@@ -1,5 +1,6 @@
 import Base
 import ./runtime.bend as R
+import ./control.bend as X
 import ./utf8.bend as U
 
 # Serve
@@ -205,29 +206,47 @@ def Serve.text(+ss: List<&2, R.Snap>) -> String:
     ++ Serve.head("bendkube_reconcile_duration_seconds", "histogram", "How long reconciles take.")
     ++ Serve.hist(ss, "bendkube_reconcile_duration_seconds")
 
-def Serve.metrics(+ss: List<&2, R.Snap>) -> String:
-  Serve.reply(200, "text/plain; version=0.0.4", Serve.text(ss))
+# bend-kube's series, then the controller's own (own).
+def Serve.metrics(+ss: List<&2, R.Snap>, own: String) -> String:
+  Serve.reply(200, "text/plain; version=0.0.4", Serve.text(ss) ++ own)
 
-def Serve.or_unavailable(m: Maybe<&2, List<&2, R.Snap>>, metrics: Bool) -> String:
+def Serve.or_unavailable(m: Maybe<&2, List<&2, R.Snap>>, metrics: Bool, own: String) -> String:
   match m metrics:
     case Some{+ss} True{}:
-      Serve.metrics(ss)
+      Serve.metrics(ss, own)
     case Some{+ss} False{}:
       Serve.ready(ss)
     case None{} _:
       Serve.unavailable()
 
+# The controller's own metrics (X.Meter), rendered by the meter; nothing
+# if it does not answer within 2s.
+def Serve.meter.answer(m: Poll<&1, &1, Maybe<&1, String>, Unit>) -> String:
+  match m:
+    case Ready{Some{t}}:
+      t
+    case _:
+      ""
+
+def Serve.meter(+meter: Chan(X.Meter)) -> IO(String):
+  IO.bind(Chan(String), String, Chan.new(String, 1),
+    +c => IO.bind(Poll<&1, &1, Result<&1, &1, X.Meter, Unit>, X.Meter>, String,
+      Chan.try_send(X.Meter, meter, X.MRead{c}, 1000),
+      u => IO.bind(Poll<&1, &1, Maybe<&1, String>, Unit>, String, Chan.try_recv(String, c, 2000),
+        m => IO.pure(String, Serve.meter.answer(m)))))
+
 # The answer to a request.
-def Serve.route(path: String, +status: Chan(R.SMsg)) -> IO(String):
+def Serve.route(path: String, +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(String):
   match path:
     case "/healthz":
       IO.pure(String, Serve.reply(200, "text/plain", "ok\n"))
     case "/readyz":
       IO.bind(Maybe<&2, List<&2, R.Snap>>, String, Serve.probe(status),
-        m => IO.pure(String, Serve.or_unavailable(m, False{})))
+        m => IO.pure(String, Serve.or_unavailable(m, False{}, "")))
     case "/metrics":
       IO.bind(Maybe<&2, List<&2, R.Snap>>, String, Serve.probe(status),
-        m => IO.pure(String, Serve.or_unavailable(m, True{})))
+        m => IO.bind(String, String, Serve.meter(meter),
+          own => IO.pure(String, Serve.or_unavailable(m, True{}, own))))
     case _:
       IO.pure(String, Serve.reply(404, "text/plain", "not found\n"))
 
@@ -242,21 +261,21 @@ def Serve.answer(s: Socket, text: String) -> IO(Unit):
     List<&2, U32>>, Unit, TCP.try_send(s, text, 5000), Serve.answer.done)
 
 def Serve.handle.got(p: Socket & Poll<&1, &1, Serve.Res(Maybe<&1, String>), Unit>,
-  +status: Chan(R.SMsg)) -> IO(Unit):
+  +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
   match p:
     case (s, Ready{Done{Some{req}}}):
-      IO.bind(String, Unit, Serve.route(Serve.path(req), status), t => Serve.answer(s, t))
+      IO.bind(String, Unit, Serve.route(Serve.path(req), status, meter), t => Serve.answer(s, t))
     case (s, _):
       Socket.close(s)
 
-def Serve.handle(s: Socket, +status: Chan(R.SMsg)) -> IO(Unit):
+def Serve.handle(s: Socket, +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
   IO.bind(Socket & Poll<&1, &1, Serve.Res(Maybe<&1, String>), Unit>, Unit,
-    TCP.try_recv(s, 8192, 5000), p => Serve.handle.got(p, status))
+    TCP.try_recv(s, 8192, 5000), p => Serve.handle.got(p, status, meter))
 
-def Serve.accepted(r: Serve.Res(Socket), +status: Chan(R.SMsg)) -> IO(Unit):
+def Serve.accepted(r: Serve.Res(Socket), +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
   match r:
     case Done{s}:
-      IO.spawn(Unit, Serve.handle(s, status))
+      IO.spawn(Unit, Serve.handle(s, status, meter))
     case Fail{e}:
       IO.pure(Unit, Unit{})
 
@@ -269,27 +288,27 @@ def AEv.got(p: Listener & Serve.Res(Socket)) -> AEv:
       AGot{l, r}
 
 # Accepts forever (fuel permitting), serving each connection on its own.
-def Serve.loop(outer: Nat, fuel: Nat, ev: AEv, +status: Chan(R.SMsg)) -> IO(Unit):
+def Serve.loop(outer: Nat, fuel: Nat, ev: AEv, +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
   match outer fuel ev:
     case 0n 0n AGot{l, r}:
       Listener.close(l)
     case 1n+o 0n e:
-      Serve.loop(o, 4294967295n, e, status)
+      Serve.loop(o, 4294967295n, e, status, meter)
     case o 1n+f AGot{l, r}:
-      IO.bind(Unit, Unit, Serve.accepted(r, status),
+      IO.bind(Unit, Unit, Serve.accepted(r, status, meter),
         u => IO.bind(Listener & Serve.Res(Socket), Unit, TCP.accept(l),
-          p => Serve.loop(o, f, AEv.got(p), status)))
+          p => Serve.loop(o, f, AEv.got(p), status, meter)))
 
-def Serve.listening(r: Serve.Res(Listener), +status: Chan(R.SMsg)) -> IO(Unit):
+def Serve.listening(r: Serve.Res(Listener), +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
   match r:
     case Done{l}:
       IO.bind(Listener & Serve.Res(Socket), Unit, TCP.accept(l),
-        p => Serve.loop(4294967295n, 4294967295n, AEv.got(p), status))
+        p => Serve.loop(4294967295n, 4294967295n, AEv.got(p), status, meter))
     case Fail{(c, m)}:
       # probes and metrics are part of the contract with the kubelet: a
       # port that cannot be bound is fatal (as in controller-runtime)
       IO.die(Unit, 1, "bend-kube: health server cannot listen: " ++ m)
 
 # Serves the endpoints on 0.0.0.0:port.
-def Serve.run(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):
-  IO.bind(Serve.Res(Listener), Unit, TCP.listen("0.0.0.0", port), r => Serve.listening(r, status))
+def Serve.run(+port: U32, +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
+  IO.bind(Serve.Res(Listener), Unit, TCP.listen("0.0.0.0", port), r => Serve.listening(r, status, meter))

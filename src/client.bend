@@ -6,6 +6,7 @@ import ./core.bend as C
 import ./config.bend as K
 import ./net.bend as N
 import ./yaml.bend as Y
+import ./queue.bend as Q
 
 # Client
 # ======
@@ -22,9 +23,12 @@ import ./yaml.bend as Y
 def Res(-A: Type) -> Type:
   Result<&1, &1, U32 & String, A>
 
+# KRetry: an API error whose Status names a delay (details.retryAfterSeconds,
+# as the API server sends with 429 and some 5xx answers).
 type KErr is Data:
   KNet{code: U32, msg: String}
   KApi{status: C.Status}
+  KRetry{status: C.Status, secs: U32}
   KDecode{msg: String}
 
 type Reply is Data:
@@ -36,6 +40,8 @@ def KErr.show(e: KErr) -> String:
       "network: " ++ m
     case KApi{s}:
       "api: " ++ C.Status.show(s)
+    case KRetry{s, +n}:
+      "api: " ++ C.Status.show(s) ++ " (retry after " ++ U32.show(n) ++ "s)"
     case KDecode{m}:
       "decode: " ++ m
 
@@ -47,12 +53,16 @@ def KErr.retryable(e: KErr) -> Bool:
       True{}
     case KApi{C.Status{+c, r, m}}:
       Bool.or(U32.is_eq(c, 429), U32.is_ge(c, 500))
+    case KRetry{s, n}:
+      True{}
     case KDecode{m}:
       False{}
 
 def KErr.code(e: KErr) -> U32:
   match e:
     case KApi{C.Status{c, r, m}}:
+      c
+    case KRetry{C.Status{c, r, m}, n}:
       c
     case _:
       0
@@ -61,8 +71,30 @@ def KErr.reason(e: KErr) -> String:
   match e:
     case KApi{C.Status{c, r, m}}:
       r
+    case KRetry{C.Status{c, r, m}, n}:
+      r
     case _:
       ""
+
+# The delay the server asked for, in seconds, if it named one.
+def KErr.retry_after(e: KErr) -> Maybe<&2, U32>:
+  match e:
+    case KRetry{s, n}:
+      Some{n}
+    case _:
+      None{}
+
+def KErr.action.go(+e: KErr, m: Maybe<&2, U32>) -> Q.Action:
+  match m:
+    case Some{+n}:
+      Q.RetryIn{KErr.show(e), (n * 1000 : U32)}
+    case None{}:
+      Q.Retry{KErr.show(e)}
+
+# What a reconcile answers after a failed call: retry after the delay the
+# server named (a 429's Retry-After), else retry with the key's backoff.
+def KErr.action(+e: KErr) -> Q.Action:
+  KErr.action.go(e, KErr.retry_after(e))
 
 # A write lost to a newer resourceVersion (409 Conflict): read again and
 # retry (client-go's retry.RetryOnConflict case).
@@ -594,6 +626,13 @@ def Client.json.status.fix(+c: U32, s: C.Status) -> C.Status:
     case C.Status{+k, r, m}:
       Client.json.status.fix.go(c, k, r, m, U32.is_eq(k, 0))
 
+def Client.json.err(s: C.Status, m: Maybe<&2, U32>) -> KErr:
+  match m:
+    case Some{n}:
+      KRetry{s, n}
+    case None{}:
+      KApi{s}
+
 def Client.json.status(+c: U32, j: Result<&2, &2, String, J.Json>, ok: Bool) ->
   Result<&2, &2, KErr, J.Json>:
   match j ok:
@@ -602,7 +641,8 @@ def Client.json.status(+c: U32, j: Result<&2, &2, String, J.Json>, ok: Bool) ->
     case Fail{m} True{}:
       Fail{KDecode{m}}
     case Done{+x} False{}:
-      Fail{KApi{Client.json.status.fix(c, C.Status.of(x))}}
+      Fail{Client.json.err(Client.json.status.fix(c, C.Status.of(x)),
+        J.Json.as_u32(J.Json.at(x, ["details", "retryAfterSeconds"])))}
     case Fail{m} False{}:
       Fail{KApi{C.Status{c, "", "non-JSON error body"}}}
 

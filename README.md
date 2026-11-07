@@ -176,7 +176,10 @@ transforms kube-rs and controller-runtime users apply by hand.
 - No reconcile starts until every cache has listed. `/readyz` waits for all
   of them.
 - **Errors:** a reconcile answers `Retry{msg}` to back off, or
-  `RetryIn{msg, ms}` when it chooses the delay itself. Both are logged as
+  `RetryIn{msg, ms}` when it chooses the delay itself. After a failed call,
+  `Cl.KErr.action(e)` picks for it. It answers `RetryIn` with the delay the
+  server named (a 429's `details.retryAfterSeconds`, kept as
+  `Cl.KErr.retry_after`), and `Retry` otherwise. Both are logged as
   warnings with the key and count as errors. `Hold{ms}` means "not done
   yet, look again after ms" and isn't an error. `Cl.KErr` has
   `is_conflict`, `is_not_found`, `is_already_exists` and `is_throttled`.
@@ -388,7 +391,12 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   `bendkube_store_objects` (the primary's cache),
   `bendkube_cache_objects{cache="n"}` (each related watch's cache),
   `bendkube_store_ready` and `bendkube_leader`.
-  Counters are 32-bit and wrap; Prometheus reads a wrap as a reset. The
+  Counters are 32-bit and wrap; Prometheus reads a wrap as a reset.
+- A controller's own metrics: `Metrics.add(ctx, name, labels, n)` adds to
+  a counter and `Metrics.set(ctx, name, labels, v)` sets a gauge, from
+  `src/helpers.bend`. `labels` is the inside of the braces, as
+  `bundle="b1"`. `/metrics` serves them after bend-kube's own series.
+  `examples/bundle.bend` counts its syncs this way. The
   duration sum is kept in seconds and lasts 136 years. A duration made
   absurd by the wall clock stepping back counts as 0.
 - Events go to `events.k8s.io/v1` (`Event.publish`).
