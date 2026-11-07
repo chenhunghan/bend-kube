@@ -626,8 +626,10 @@ def Ctl.ticked(st: CState) -> CState:
 # kube-runtime's scheduler: a key has at most one pending wake, the
 # earliest asked for. A timer the queue arms for a key that already waits
 # for an earlier (or equal) wake only takes its generation; otherwise it
-# becomes the key's wake, and one sleeper is started for it. So sleepers
-# never outnumber keys, however often a key is requeued.
+# becomes the key's wake, and one sleeper is started for it. A later or
+# equal request starts no sleeper; only an earlier one does, and the one it
+# outdoes wakes to nothing when its time comes. So a key holds a live
+# sleeper only for each strictly earlier wake asked, never one per requeue.
 
 # A sleeper to start: wake key after ms, naming its deadline.
 type Sleep is Data:

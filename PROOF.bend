@@ -212,3 +212,9 @@ def Laws.lease_holder_duration_rules():
 
 def Laws.filter_new_uid_passes(r1, r2, a, b):
   {==}
+
+def Laws.lease_default_timing_ok():
+  {==}
+
+def Laws.lease_short_lease_refused():
+  {==}

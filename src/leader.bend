@@ -284,6 +284,25 @@ def Leader.on_signal(+cfg: K.Config, +o: LOpts, drain: IO(Bool)) -> IO(Unit):
 
 # Runs work only while we hold the lease (client-go's RunOrDie); drain runs
 # on SIGTERM before the lease is handed back.
-def Leader.elect(+cfg: K.Config, +o: LOpts, drain: IO(Bool), work: IO(Unit)) -> IO(Unit):
+def Leader.elect.go(+cfg: K.Config, +o: LOpts, drain: IO(Bool), work: IO(Unit)) -> IO(Unit):
   IO.bind(Unit, Unit, IO.spawn(Unit, Leader.on_signal(cfg, o, drain)),
     u => Leader.run(4294967295n, 4294967295n, LTry{}, cfg, o, E.Obs.none(), False{}, 0, Some{work}))
+
+def LOpts.check(o: LOpts) -> Maybe<&2, String>:
+  match o:
+    case LOpts{ns, n, i, +d, +dl, +r}:
+      E.Lease.timing(d, dl, r)
+
+def Leader.elect.ok(+cfg: K.Config, +o: LOpts, drain: IO(Bool), work: IO(Unit), bad: Maybe<&2, String>) ->
+  IO(Unit):
+  match bad:
+    case Some{e}:
+      IO.die(Unit, 1, "bend-kube: " ++ e)
+    case None{}:
+      Leader.elect.go(cfg, o, drain, work)
+
+# Runs work only while we hold the lease (client-go's RunOrDie), after
+# checking the timing is safe (Lease.timing); drain runs on SIGTERM before
+# the lease is handed back.
+def Leader.elect(+cfg: K.Config, +o: LOpts, drain: IO(Bool), work: IO(Unit)) -> IO(Unit):
+  Leader.elect.ok(cfg, o, drain, work, LOpts.check(o))
