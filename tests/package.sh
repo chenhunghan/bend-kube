@@ -32,9 +32,12 @@ bad=$(grep -v -E '^(LICENSE|LAWS\.bend|PROOF\.bend|package\.bend|src/[a-z0-9_]+\
 [ -z "$bad" ] || { echo "FAIL unexpected files in the package: $bad"; exit 1; }
 echo "ok   published $name@$ver: $(wc -l < "$work/files" | tr -d ' ') files"
 
-mkdir "$work/consumer"
-sed "s|^import \.\./src/|import $name@$ver/src/|" examples/mirror.bend > "$work/consumer/main.bend"
-(cd "$work/consumer" && hub bend main.bend -o op) > "$work/build.out" 2>&1 && [ -x "$work/consumer/op" ] \
-  || { cat "$work/build.out"; echo "FAIL a controller importing $name@$ver does not build"; exit 1; }
-echo "ok   a controller importing $name@$ver builds"
+# One controller on the older API (Kube.run), one on specs (Kube.control).
+for ex in mirror bundle; do
+  mkdir "$work/$ex"
+  sed "s|^import \.\./src/|import $name@$ver/src/|" "examples/$ex.bend" > "$work/$ex/main.bend"
+  (cd "$work/$ex" && hub bend main.bend -o op) > "$work/build.out" 2>&1 && [ -x "$work/$ex/op" ] \
+    || { cat "$work/build.out"; echo "FAIL $ex importing $name@$ver does not build"; exit 1; }
+  echo "ok   $ex importing $name@$ver builds"
+done
 echo; echo "package tests pass"

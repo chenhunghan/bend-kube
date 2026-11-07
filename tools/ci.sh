@@ -27,7 +27,7 @@ out=$(bend PROOF.bend --verdict 2>&1) || true; echo "$out" | tail -1
 echo "$out" | grep -q "ALL PROOFS CHECK" || { echo "$out"; exit 1; }
 
 step "pure modules"
-for m in json utf8 base64 yaml http ws core config proxy watcher store queue lease time finalizer typed; do
+for m in json utf8 base64 yaml http ws core config proxy watcher store queue control lease time finalizer typed; do
   out=$(bend src/$m.bend --check-only 2>&1) || true
   if echo "$out" | grep -q "ALL PROOFS CHECK"; then echo "ok   $m"; else echo "FAIL $m"; echo "$out"; exit 1; fi
 done

@@ -1,0 +1,17 @@
+first list: keys: web/a web/b; gone: -
+status write, spec change, deletion, delete: keys: web/b web/a; gone: web/b
+unchanged relist: keys: -; gone: -
+no predicates: keys: web/a; gone: -
+owned: keys: web/a; gone: -
+owner moved, then deleted: keys: web/a web/b web/b web/b; gone: -
+referenced by spec.secretName: keys: web/b; gone: -
+listed in spec.hosts: keys: web/a; gone: -
+named by label site: keys: web/b; gone: -
+every primary nearby: keys: web/b web/a web/b web/a; gone: -
+ctx idx: 3
+ctx get web/a: a
+ctx list: a b
+ctx children of a: a-db a-web
+ctx children of b: b-web
+ctx cache 2 (none): -
+ctx find web/a-db: a-db

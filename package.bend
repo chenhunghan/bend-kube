@@ -8,6 +8,7 @@ import ./PROOF.bend as Proof
 import ./src/base64.bend as Base64
 import ./src/client.bend as Client
 import ./src/config.bend as Config
+import ./src/control.bend as Control
 import ./src/core.bend as Core
 import ./src/exec.bend as Exec
 import ./src/finalizer.bend as Finalizer

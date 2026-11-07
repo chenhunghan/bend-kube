@@ -5,6 +5,7 @@ import ../src/config.bend as K
 import ../src/client.bend as Cl
 import ../src/queue.bend as Q
 import ../src/kube.bend as Kb
+import ../src/control.bend as X
 import ../src/helpers.bend as Hp
 import ../src/log.bend as L
 import ./gen/website.bend as Wb
@@ -15,7 +16,9 @@ import ./gen/website.bend as Wb
 # Warning event and left until it changes. The Deployment is kept by
 # server-side apply; the Website's status (phase, readyReplicas,
 # observedGeneration) by its status subresource. Deployment changes
-# reconcile their Website through ownerReferences.
+# reconcile their Website through ownerReferences. The generation predicate
+# keeps the operator's own status writes from waking it: only spec changes
+# (and deletions) of a Website, and any change to its Deployment, do.
 
 def websites() -> C.Api:
   Wb.Website.api(C.AllNs{})
@@ -116,17 +119,22 @@ def run(+o: J.Json, +cfg: K.Config, w: Result<&2, &2, String, Wb.Website>) -> IO
 def reconcile.of(+o: J.Json, +cfg: K.Config) -> IO(Q.Action):
   run(o, cfg, Wb.Website.of(o))
 
-def reconcile(o: J.Json, cfg: K.Config) -> IO(Q.Action):
-  reconcile.of(o, cfg)
+def reconcile(o: J.Json, c: X.Ctx) -> IO(Q.Action):
+  reconcile.of(o, X.Ctx.cfg(c))
+
+# Websites, filtered by generation, owning Deployments.
+def spec() -> X.Spec:
+  X.Spec.filter(X.Spec.owns(X.Spec.of(websites()), C.Api{C.Res.deployments(), C.AllNs{}}),
+    [X.PGeneration{}])
 
 def main.id(r: Result<&1, &1, U32 & String, String>) -> IO(Unit):
   match r:
     case Done{id}:
-      Kb.Kube.run(~reconcile, websites(), [C.Api{C.Res.deployments(), C.AllNs{}}],
+      Kb.Kube.control(~reconcile, spec(),
         Kb.Opts.with_leader(Kb.Opts.default(), "bend-kube-system", "bend-kube-website", id))
     case Fail{e}:
       # outside a pod (no HOSTNAME): run alone, without leader election
-      Kb.Kube.run(~reconcile, websites(), [C.Api{C.Res.deployments(), C.AllNs{}}], Kb.Opts.default())
+      Kb.Kube.control(~reconcile, spec(), Kb.Opts.default())
 
 def main() -> IO(Unit):
   IO.bind(Result<&1, &1, U32 & String, String>, Unit, IO.get_env("HOSTNAME"), main.id)

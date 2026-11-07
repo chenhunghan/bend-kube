@@ -10,6 +10,9 @@ import ./watcher.bend as W
 import ./store.bend as S
 import ./queue.bend as Q
 import ./log.bend as L
+import ./control.bend as X
+import ./time.bend as T
+import ./sys.bend as Y
 
 # Runtime
 # =======
@@ -26,13 +29,14 @@ import ./log.bend as L
 
 type Msg is Data:
   MOuts{src: U32, outs: List<&2, W.Out>}
-  MDone{key: String, act: Q.Action}
+  MDone{key: String, act: Q.Action, ms: U32}
   MWake{key: String, gen: U32}
+  MStop{reply: Chan(Unit)}
 
 # The controller's state as the health server reports it.
 type Snap is Data:
   Snap{name: String, ready: Bool, reconciles: U32, errors: U32, events: U32, running: U32,
-    objects: U32}
+    objects: U32, queued: U32, hist: List<&2, U32>, sum_ms: U32}
 
 # The status keeper's inbox: a controller's latest snapshot (by its index),
 # or a query for all of them (none until a controller runs: a standby
@@ -41,9 +45,10 @@ type SMsg is Data:
   SPut{idx: U32, snap: Snap}
   SGet{reply: Chan(List<&2, Snap>)}
 
-# Counters since start.
+# Counters since start; hist counts reconciles by duration (Hist.bounds),
+# sum_ms is their total time.
 type Stats is Data:
-  Stats{reconciles: U32, errors: U32, events: U32}
+  Stats{reconciles: U32, errors: U32, events: U32, hist: List<&2, U32>, sum_ms: U32}
 
 # Watcher driver
 # --------------
@@ -290,12 +295,20 @@ def Drv.run(fuel: Nat, ev: DEv, +st: W.WState, +resp: H.Resp, +carry: List<&2, U
 
 # Controller
 # ----------
+#
+# A controller's loop owns its caches (the primary's and one per related
+# watch) and its queue, all pure values. A batch of watcher outputs is
+# folded into its cache by control.bend, which says which keys it
+# triggers; reconciles start once every cache has listed, each with a
+# snapshot of the caches (X.Ctx). A stop request (MStop) starts no more
+# reconciles and is answered once the running ones finish.
 
 type CState is Data:
-  CState{store: S.Store, queue: Q.Queue, stats: Stats}
+  CState{store: S.Store, caches: List<&2, S.Store>, queue: Q.Queue, stats: Stats,
+    stop: Maybe<&2, Chan(Unit)>}
 
 type CCtx is Data:
-  CCtx{cfg: K.Config, kind: String, chan: Chan(Msg), status: Chan(SMsg), idx: U32}
+  CCtx{cfg: K.Config, spec: X.Spec, chan: Chan(Msg), status: Chan(SMsg), idx: U32}
 
 # A reconcile to start: the key and the object the store holds for it.
 type Job is Data:
@@ -306,116 +319,148 @@ type CEv is Type:
   CMsg{m: Maybe<&1, Msg>}
   CHandled{r: CState & List<&2, Q.Timer>}
   CDisp{r: CState & List<&2, Job>}
+  CNext{halt: Maybe<&2, Chan(Unit)>}
 
-# The keys a primary watcher's outputs trigger: every object it applies.
-# Deletions trigger nothing; finalizers are how a reconciler sees them.
-def Ctl.self_keys(outs: List<&2, W.Out>) -> List<&2, String>:
-  match outs:
-    case Nil{}:
+def Caches.nth(cs: List<&2, S.Store>, n: Nat) -> S.Store:
+  match cs n:
+    case Nil{} k:
+      S.Store.new()
+    case Con{s, t} 0n:
+      s
+    case Con{s, t} 1n+k:
+      Caches.nth(t, k)
+
+def Caches.set(cs: List<&2, S.Store>, n: Nat, x: S.Store) -> List<&2, S.Store>:
+  match cs n:
+    case Nil{} k:
       Nil{}
-    case Con{W.OApply{+o}, t}:
-      C.Obj.key(o) <> Ctl.self_keys(t)
-    case Con{W.OInitApply{+o}, t}:
-      C.Obj.key(o) <> Ctl.self_keys(t)
-    case Con{o, t}:
-      Ctl.self_keys(t)
+    case Con{s, t} 0n:
+      x <> t
+    case Con{s, t} 1n+k:
+      s <> Caches.set(t, k, x)
 
-# The keys of objects a primary watcher saw deleted.
-def Ctl.gone_keys(outs: List<&2, W.Out>) -> List<&2, String>:
-  match outs:
+def Caches.ready(cs: List<&2, S.Store>) -> Bool:
+  match cs:
     case Nil{}:
-      Nil{}
-    case Con{W.ODelete{+o}, t}:
-      C.Obj.key(o) <> Ctl.gone_keys(t)
-    case Con{o, t}:
-      Ctl.gone_keys(t)
+      True{}
+    case Con{s, t}:
+      Bool.and(S.Store.ready(s), Caches.ready(t))
 
-def Ctl.ref_keys(rs: List<&2, C.ObjRef>) -> List<&2, String>:
-  match rs:
+def Secs.rel(ss: List<&2, X.Sec>, n: Nat) -> X.Rel:
+  match ss n:
+    case Nil{} k:
+      X.ROwner{}
+    case Con{s, t} 0n:
+      X.Sec.rel(s)
+    case Con{s, t} 1n+k:
+      Secs.rel(t, k)
+
+# Histogram
+# ---------
+
+# Reconcile durations: upper bounds in ms, as Prometheus' default buckets
+# (5ms to 10s); the last count is everything slower.
+def Hist.bounds() -> List<&2, U32>:
+  [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+
+def Hist.zero() -> List<&2, U32>:
+  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Whether ms falls in the first bucket of bs (the overflow when none is left).
+def Hist.fits(bs: List<&2, U32>, +ms: U32) -> Bool:
+  match bs:
+    case Con{b, t}:
+      U32.is_le(ms, b)
     case Nil{}:
+      True{}
+
+def Hist.bump.go(cs: List<&2, U32>, bs: List<&2, U32>, +ms: U32, hit: Bool) -> List<&2, U32>:
+  match cs bs hit:
+    case Con{+c, t} b True{}:
+      (c + 1 : U32) <> t
+    case Con{c, t} Con{b, +bt} False{}:
+      c <> Hist.bump.go(t, bt, ms, Hist.fits(bt, ms))
+    case Con{+c, t} Nil{} False{}:
+      (c + 1 : U32) <> t
+    case Nil{} b h:
       Nil{}
-    case Con{r, t}:
-      C.ObjRef.key(r) <> Ctl.ref_keys(t)
 
-def Ctl.out_obj(o: W.Out) -> Maybe<&2, J.Json>:
-  match o:
-    case W.OApply{x}:
-      Some{x}
-    case W.OInitApply{x}:
-      Some{x}
-    case W.ODelete{x}:
-      Some{x}
-    case _:
-      None{}
+def Hist.bump(cs: List<&2, U32>, +ms: U32) -> List<&2, U32>:
+  Hist.bump.go(cs, Hist.bounds(), ms, Hist.fits(Hist.bounds(), ms))
 
-def Ctl.owner_keys.put(m: Maybe<&2, J.Json>, +kind: String, rest: List<&2, String>) ->
-  List<&2, String>:
-  match m:
-    case Some{+x}:
-      List.append(&2, String, Ctl.ref_keys(C.Obj.owners(x, kind)), rest)
-    case None{}:
-      rest
-
-# The keys an owned watcher's outputs trigger: the owners of the kind
-# every changed object names (kube-runtime's Controller::owns), deletions
-# included.
-def Ctl.owner_keys(outs: List<&2, W.Out>, +kind: String) -> List<&2, String>:
-  match outs:
-    case Nil{}:
-      Nil{}
-    case Con{o, t}:
-      Ctl.owner_keys.put(Ctl.out_obj(o), kind, Ctl.owner_keys(t, kind))
-
-def Stats.count(+n: Nat) -> U32:
-  U32.from_nat(n)
+# Folding
+# -------
 
 def Stats.events(x: Stats, +n: U32) -> Stats:
   match x:
-    case Stats{r, e, +v}:
-      Stats{r, e, (v + n : U32)}
+    case Stats{r, e, +v, h, sm}:
+      Stats{r, e, (v + n : U32), h, sm}
 
-def Stats.done(x: Stats, a: Q.Action) -> Stats:
+def Stats.done(x: Stats, a: Q.Action, +ms: U32) -> Stats:
   match x a:
-    case Stats{+r, +e, v} Q.Retry{m}:
-      Stats{(r + 1 : U32), (e + 1 : U32), v}
-    case Stats{+r, e, v} _:
-      Stats{(r + 1 : U32), e, v}
+    case Stats{+r, +e, v, h, +sm} Q.Retry{m}:
+      Stats{(r + 1 : U32), (e + 1 : U32), v, Hist.bump(h, ms), (sm + ms : U32)}
+    case Stats{+r, e, v, h, +sm} _:
+      Stats{(r + 1 : U32), e, v, Hist.bump(h, ms), (sm + ms : U32)}
 
-def Ctl.on_outs(st: CState, +src: U32, +outs: List<&2, W.Out>, +kind: String, own: Bool) -> CState:
+def Ctl.prim.put(cs: List<&2, S.Store>, q: Q.Queue, x: Stats, p: Maybe<&2, Chan(Unit)>,
+  f: X.Fold) -> CState:
+  match f:
+    case X.Fold{s, ks, g}:
+      CState{s, cs, Q.Queue.forget_all(g, Q.Queue.add_all(ks, q)), x, p}
+
+def Ctl.rel.put(+n: Nat, s: S.Store, cs: List<&2, S.Store>, q: Q.Queue, x: Stats,
+  p: Maybe<&2, Chan(Unit)>, f: X.Fold) -> CState:
+  match f:
+    case X.Fold{c, ks, g}:
+      CState{s, Caches.set(cs, n, c), Q.Queue.add_all(ks, q), x, p}
+
+# Outputs of watch src: the primary's (0) through its predicates, a related
+# watch's (n) through its relation.
+def Ctl.on_outs(st: CState, +src: U32, +outs: List<&2, W.Out>, +spec: X.Spec, own: Bool) -> CState:
   match st own:
-    case CState{s, q, x} True{}:
-      CState{S.Store.apply_all(outs, s),
-        Q.Queue.forget_all(Ctl.gone_keys(outs), Q.Queue.add_all(Ctl.self_keys(outs), q)),
-        Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs)))}
-    case CState{s, q, x} False{}:
-      CState{s, Q.Queue.add_all(Ctl.owner_keys(outs, kind), q),
-        Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs)))}
+    case CState{s, cs, q, x, p} True{}:
+      Ctl.prim.put(cs, q, Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs))), p,
+        X.Fold.prim(X.Spec.preds(spec), outs, X.Fold{s, Nil{}, Nil{}}))
+    case CState{+s, +cs, q, x, p} False{}:
+      Ctl.rel.put(U32.to_nat((src - 1 : U32)), s, cs, q,
+        Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs))), p,
+        X.Fold.rel(Secs.rel(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))), X.Spec.kind(spec),
+          outs, s, X.Fold{Caches.nth(cs, U32.to_nat((src - 1 : U32))), Nil{}, Nil{}}))
 
-def Ctl.on_done(s: S.Store, x: Stats, r: Q.Queue & List<&2, Q.Timer>) ->
-  CState & List<&2, Q.Timer>:
+def Ctl.on_done(s: S.Store, cs: List<&2, S.Store>, x: Stats, p: Maybe<&2, Chan(Unit)>,
+  r: Q.Queue & List<&2, Q.Timer>) -> CState & List<&2, Q.Timer>:
   match r:
     case (q, ts):
-      (CState{s, q, x}, ts)
+      (CState{s, cs, q, x, p}, ts)
 
-def Ctl.on_done.st(st: CState, key: String, +a: Q.Action) -> CState & List<&2, Q.Timer>:
+def Ctl.on_done.st(st: CState, key: String, +a: Q.Action, +ms: U32) ->
+  CState & List<&2, Q.Timer>:
   match st:
-    case CState{s, q, x}:
-      Ctl.on_done(s, Stats.done(x, a), Q.Queue.done(q, key, a))
+    case CState{s, cs, q, x, p}:
+      Ctl.on_done(s, cs, Stats.done(x, a, ms), p, Q.Queue.done(q, key, a))
 
 def Ctl.on_wake(st: CState, key: String, g: U32) -> CState & List<&2, Q.Timer>:
   match st:
-    case CState{s, q, x}:
-      (CState{s, Q.Queue.wake(q, key, g), x}, Nil{})
+    case CState{s, cs, q, x, p}:
+      (CState{s, cs, Q.Queue.wake(q, key, g), x, p}, Nil{})
+
+def Ctl.on_stop(st: CState, r: Chan(Unit)) -> CState & List<&2, Q.Timer>:
+  match st:
+    case CState{s, cs, q, x, p}:
+      (CState{s, cs, q, x, Some{r}}, Nil{})
 
 # A message's effect on the state, and the timers it arms.
-def Ctl.on_msg(st: CState, m: Msg, +kind: String) -> CState & List<&2, Q.Timer>:
+def Ctl.on_msg(st: CState, m: Msg, +spec: X.Spec) -> CState & List<&2, Q.Timer>:
   match m:
     case MOuts{+src, outs}:
-      (Ctl.on_outs(st, src, outs, kind, U32.is_eq(src, 0)), Nil{})
-    case MDone{key, a}:
-      Ctl.on_done.st(st, key, a)
+      (Ctl.on_outs(st, src, outs, spec, U32.is_eq(src, 0)), Nil{})
+    case MDone{key, a, ms}:
+      Ctl.on_done.st(st, key, a, ms)
     case MWake{key, g}:
       Ctl.on_wake(st, key, g)
+    case MStop{r}:
+      Ctl.on_stop(st, r)
 
 def Ctl.dispatch.drop(r: Q.Queue & List<&2, Q.Timer>, jobs: List<&2, Job>) ->
   Q.Queue & List<&2, Job>:
@@ -446,34 +491,59 @@ def Ctl.dispatch.go(ks: List<&2, String>, +s: S.Store, acc: Q.Queue & List<&2, J
     case Con{+k, t}:
       Ctl.dispatch.go(t, s, Ctl.dispatch.acc(k, S.Store.get(s, k), acc))
 
-def Ctl.dispatch.wrap(s: S.Store, x: Stats, r: Q.Queue & List<&2, Job>) -> CState & List<&2, Job>:
+def Ctl.dispatch.wrap(s: S.Store, cs: List<&2, S.Store>, x: Stats, p: Maybe<&2, Chan(Unit)>,
+  r: Q.Queue & List<&2, Job>) -> CState & List<&2, Job>:
   match r:
     case (q, jobs):
-      (CState{s, q, x}, jobs)
+      (CState{s, cs, q, x, p}, jobs)
 
-def Ctl.dispatch.fin(+s: S.Store, x: Stats, r: Q.Queue & List<&2, String>) ->
-  CState & List<&2, Job>:
+def Ctl.dispatch.fin(+s: S.Store, cs: List<&2, S.Store>, x: Stats, p: Maybe<&2, Chan(Unit)>,
+  r: Q.Queue & List<&2, String>) -> CState & List<&2, Job>:
   match r:
     case (q, ks):
-      Ctl.dispatch.wrap(s, x, Ctl.dispatch.go(ks, s, (q, Nil{})))
+      Ctl.dispatch.wrap(s, cs, x, p, Ctl.dispatch.go(ks, s, (q, Nil{})))
 
-def Ctl.dispatch.ready(+s: S.Store, q: Q.Queue, x: Stats, ready: Bool) -> CState & List<&2, Job>:
+def Ctl.dispatch.ready(+s: S.Store, cs: List<&2, S.Store>, q: Q.Queue, x: Stats,
+  p: Maybe<&2, Chan(Unit)>, ready: Bool) -> CState & List<&2, Job>:
   match ready:
     case True{}:
-      Ctl.dispatch.fin(s, x, Q.Queue.pop_all(64n, q, Nil{}))
+      Ctl.dispatch.fin(s, cs, x, p, Q.Queue.pop_all(64n, q, Nil{}))
     case False{}:
-      (CState{s, q, x}, Nil{})
+      (CState{s, cs, q, x, p}, Nil{})
 
-# The reconciles to start now: none until the store has its first list.
+def Ctl.stopping(p: Maybe<&2, Chan(Unit)>) -> Bool:
+  match p:
+    case Some{r}:
+      True{}
+    case None{}:
+      False{}
+
+# The reconciles to start now: none until every cache has its first list,
+# and none once stopping.
 def Ctl.dispatch(st: CState) -> CState & List<&2, Job>:
   match st:
-    case CState{+s, q, x}:
-      Ctl.dispatch.ready(s, q, x, S.Store.ready(s))
+    case CState{+s, +cs, q, x, +p}:
+      Ctl.dispatch.ready(s, cs, q, x, p,
+        Bool.and(Bool.and(S.Store.ready(s), Caches.ready(cs)), Bool.not(Ctl.stopping(p))))
+
+def Ctl.halt.go(p: Maybe<&2, Chan(Unit)>, idle: Bool) -> Maybe<&2, Chan(Unit)>:
+  match idle:
+    case True{}:
+      p
+    case False{}:
+      None{}
+
+# Whose stop request to answer: a stopping controller with nothing running.
+def Ctl.halt(st: CState) -> Maybe<&2, Chan(Unit)>:
+  match st:
+    case CState{s, cs, +q, x, p}:
+      Ctl.halt.go(p, U32.is_eq(Q.Queue.nrun(q), 0))
 
 def Ctl.snap(st: CState, name: String) -> Snap:
   match st:
-    case CState{+s, +q, Stats{r, e, v}}:
-      Snap{name, S.Store.ready(s), r, e, v, Q.Queue.nrun(q), U32.from_nat(S.Store.size(s))}
+    case CState{+s, +cs, +q, Stats{r, e, v, h, sm}, p}:
+      Snap{name, Bool.and(S.Store.ready(s), Caches.ready(cs)), r, e, v, Q.Queue.nrun(q),
+        U32.from_nat(S.Store.size(s)), Q.Queue.depth(q), h, sm}
 
 def Ctl.timers(ts: List<&2, Q.Timer>, +chan: Chan(Msg)) -> IO(Unit):
   match ts:
@@ -488,45 +558,83 @@ def Ctl.timers(ts: List<&2, Q.Timer>, +chan: Chan(Msg)) -> IO(Unit):
 
 def CCtx.chan(c: CCtx) -> Chan(Msg):
   match c:
-    case CCtx{cfg, k, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix}:
       ch
 
 def CCtx.cfg(c: CCtx) -> K.Config:
   match c:
-    case CCtx{cfg, k, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix}:
       cfg
+
+def CCtx.spec(c: CCtx) -> X.Spec:
+  match c:
+    case CCtx{cfg, sp, ch, st, ix}:
+      sp
 
 def CCtx.status(c: CCtx) -> Chan(SMsg):
   match c:
-    case CCtx{cfg, k, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix}:
       st
 
 def CCtx.idx(c: CCtx) -> U32:
   match c:
-    case CCtx{cfg, k, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix}:
       ix
 
 def CCtx.kind(c: CCtx) -> String:
-  match c:
-    case CCtx{cfg, k, ch, st, ix}:
-      k
+  X.Spec.kind(CCtx.spec(c))
+
+# What a reconcile sees: the config, the controller's index and the caches.
+def Ctl.ctx(st: CState, +c: CCtx) -> X.Ctx:
+  match st:
+    case CState{s, cs, q, x, p}:
+      X.Ctx{CCtx.cfg(c), CCtx.idx(c), s, cs}
+
+def Ctl.report(+key: String, +kind: String, a: Q.Action) -> IO(Unit):
+  match a:
+    case Q.Retry{m}:
+      L.Log.warn("reconcile failed; retrying with backoff",
+        [L.Log.kv("kind", kind), L.Log.kv("key", key), L.Log.kv("error", m)])
+    case _:
+      IO.pure(Unit, Unit{})
+
+def Ctl.now(w: U32 & (U32 & U32)) -> U32:
+  T.Wall.ms(T.Wall.of(w))
+
+def Ctl.job.end(+key: String, +a: Q.Action, +t0: U32, +kind: String, +chan: Chan(Msg)) ->
+  IO(Result<&1, &1, Msg, Unit>):
+  IO.bind(U32 & (U32 & U32), Result<&1, &1, Msg, Unit>, Y.Sys.wall(),
+    w1 => IO.bind(Unit, Result<&1, &1, Msg, Unit>, Ctl.report(key, kind, a),
+      u => Chan.send(Msg, chan, MDone{key, a, (Ctl.now(w1) - t0 : U32)})))
+
+def Ctl.job.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx,
+  +kind: String, +chan: Chan(Msg), +t0: U32) -> IO(Result<&1, &1, Msg, Unit>):
+  IO.bind(Q.Action, Result<&1, &1, Msg, Unit>, rec(o, ctx), a => Ctl.job.end(key, a, t0, kind, chan))
+
+# A reconcile, timed; a failure is logged; MDone answers on the channel.
+def Ctl.job(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx,
+  +kind: String, +chan: Chan(Msg)) -> IO(Result<&1, &1, Msg, Unit>):
+  IO.bind(U32 & (U32 & U32), Result<&1, &1, Msg, Unit>, Y.Sys.wall(),
+    w0 => Ctl.job.go(~rec, key, o, ctx, kind, chan, Ctl.now(w0)))
 
 # Starts a reconcile per job; each answers MDone on the channel.
-def Ctl.spawn(~rec: U32 -> J.Json -> K.Config -> IO(Q.Action), jobs: List<&2, Job>, +chan: Chan(Msg),
-  +cfg: K.Config, +idx: U32) -> IO(Unit):
+def Ctl.spawn(~rec: J.Json -> X.Ctx -> IO(Q.Action), jobs: List<&2, Job>, +chan: Chan(Msg),
+  +ctx: X.Ctx, +kind: String) -> IO(Unit):
   match jobs:
     case Nil{}:
       IO.pure(Unit, Unit{})
     case Con{Job{key, o}, t}:
       IO.bind(Unit, Unit,
-        IO.spawn(Result<&1, &1, Msg, Unit>,
-          IO.bind(Q.Action, Result<&1, &1, Msg, Unit>, rec(idx, o, cfg),
-            a => Chan.send(Msg, chan, MDone{key, a}))),
-        u => Ctl.spawn(~rec, t, chan, cfg, idx))
+        IO.spawn(Result<&1, &1, Msg, Unit>, Ctl.job(~rec, key, o, ctx, kind, chan)),
+        u => Ctl.spawn(~rec, t, chan, ctx, kind))
+
+def Ctl.name(+c: CCtx) -> String:
+  U32.show(CCtx.idx(c)) ++ "/" ++ CCtx.kind(c)
 
 # The controller loop: a message in, the state stepped, timers armed,
-# reconciles started, the next message awaited.
-def Ctl.run(~rec: U32 -> J.Json -> K.Config -> IO(Q.Action), fuel: Nat, ev: CEv, +st: CState,
+# reconciles started, the next message awaited; a stop request is answered
+# once nothing runs, and ends the loop.
+def Ctl.run(~rec: J.Json -> X.Ctx -> IO(Q.Action), fuel: Nat, ev: CEv, +st: CState,
   +ctx: CCtx) -> IO(Unit):
   match fuel ev:
     case 0n e:
@@ -534,32 +642,25 @@ def Ctl.run(~rec: U32 -> J.Json -> K.Config -> IO(Q.Action), fuel: Nat, ev: CEv,
     case 1n+f CMsg{None{}}:
       IO.pure(Unit, Unit{})
     case 1n+f CMsg{Some{m}}:
-      Ctl.run(~rec, f, CHandled{Ctl.on_msg(st, m, CCtx.kind(ctx))}, st, ctx)
+      Ctl.run(~rec, f, CHandled{Ctl.on_msg(st, m, CCtx.spec(ctx))}, st, ctx)
     case 1n+f CHandled{(+st1, ts)}:
       IO.bind(Unit, Unit, Ctl.timers(ts, CCtx.chan(ctx)),
         u => Ctl.run(~rec, f, CDisp{Ctl.dispatch(st1)}, st1, ctx))
     case 1n+f CDisp{(+st2, jobs)}:
-      IO.bind(Unit, Unit, Ctl.spawn(~rec, jobs, CCtx.chan(ctx), CCtx.cfg(ctx), CCtx.idx(ctx)),
+      IO.bind(Unit, Unit, Ctl.spawn(~rec, jobs, CCtx.chan(ctx), Ctl.ctx(st2, ctx), CCtx.kind(ctx)),
         u => IO.bind(Result<&1, &1, SMsg, Unit>, Unit,
-          Chan.send(SMsg, CCtx.status(ctx), SPut{CCtx.idx(ctx), Ctl.snap(st2, U32.show(CCtx.idx(ctx)) ++ "/" ++ CCtx.kind(ctx))}),
-          u2 => IO.bind(Maybe<&1, Msg>, Unit, Chan.recv(Msg, CCtx.chan(ctx)),
-            m => Ctl.run(~rec, f, CMsg{m}, st2, ctx))))
+          Chan.send(SMsg, CCtx.status(ctx), SPut{CCtx.idx(ctx), Ctl.snap(st2, Ctl.name(ctx))}),
+          u2 => Ctl.run(~rec, f, CNext{Ctl.halt(st2)}, st2, ctx)))
+    case 1n+f CNext{Some{r}}:
+      IO.bind(Result<&1, &1, Unit, Unit>, Unit, Chan.send(Unit, r, Unit{}),
+        u => L.Log.info("controller stopped", [L.Log.kv("controller", Ctl.name(ctx))]))
+    case 1n+f CNext{None{}}:
+      IO.bind(Maybe<&1, Msg>, Unit, Chan.recv(Msg, CCtx.chan(ctx)),
+        m => Ctl.run(~rec, f, CMsg{m}, st, ctx))
 
 def Ctl.watch.subs(+cfg: K.Config, api: C.Api, label: String, subs: List<&2, Sub>) -> IO(Unit):
   IO.spawn(Unit, Drv.run(4294967295n, DStart{}, W.WState.init(), H.Http.resp.init(), Nil{},
     WCtx{cfg, api, label, "", subs}))
-
-def Ctl.watch(+cfg: K.Config, api: C.Api, label: String, +src: U32, +chan: Chan(Msg)) -> IO(Unit):
-  IO.spawn(Unit, Drv.run(4294967295n, DStart{}, W.WState.init(), H.Http.resp.init(), Nil{},
-    WCtx{cfg, api, label, "", [Sub{chan, src}]}))
-
-def Ctl.watch_all(apis: List<&2, C.Api>, +n: U32, +cfg: K.Config, +chan: Chan(Msg)) -> IO(Unit):
-  match apis:
-    case Nil{}:
-      IO.pure(Unit, Unit{})
-    case Con{a, t}:
-      IO.bind(Unit, Unit, Ctl.watch(cfg, a, "", n, chan),
-        u => Ctl.watch_all(t, (n + 1 : U32), cfg, chan))
 
 def Api.kind(a: C.Api) -> String:
   match a:
@@ -576,7 +677,8 @@ def Keeper.all.go(ks: List<&2, String>, +m: Map<&2, Snap>) -> List<&2, Snap>:
     case Nil{}:
       Nil{}
     case Con{k, t}:
-      Keeper.all.put(Map.get(Snap, Snap{"", False{}, 0, 0, 0, 0, 0}, m, k), Keeper.all.go(t, m))
+      Keeper.all.put(Map.get(Snap, Snap{"", False{}, 0, 0, 0, 0, 0, 0, Hist.zero(), 0}, m, k),
+        Keeper.all.go(t, m))
 
 def Keeper.all(+m: Map<&2, Snap>) -> List<&2, Snap>:
   Keeper.all.go(Map.keys(&2, Snap, m), m)
@@ -604,27 +706,32 @@ def Keeper.start() -> IO(Chan(SMsg)):
       IO.bind(Maybe<&1, SMsg>, Unit, Chan.recv(SMsg, c),
         x => Keeper.run(4294967295n, x, Map.new(&2, Snap), c))), u => IO.pure(Chan(SMsg), c)))
 
-def Ctl.loop(~rec: U32 -> J.Json -> K.Config -> IO(Q.Action), +cfg: K.Config, +primary: C.Api, +max: U32,
+def Keeper.answer(m: Poll<&1, &1, Maybe<&1, List<&2, Snap>>, Unit>) -> List<&2, Snap>:
+  match m:
+    case Ready{Some{ss}}:
+      ss
+    case _:
+      Nil{}
+
+# Every controller's latest snapshot (none on a standby replica, or if the
+# keeper does not answer within 500ms).
+def Keeper.query(+status: Chan(SMsg)) -> IO(List<&2, Snap>):
+  IO.bind(Chan(List<&2, Snap>), List<&2, Snap>, Chan.new(List<&2, Snap>, 1),
+    +c => IO.bind(Result<&1, &1, SMsg, Unit>, List<&2, Snap>,
+      Chan.send(SMsg, status, SGet{c}),
+      u => IO.bind(Poll<&1, &1, Maybe<&1, List<&2, Snap>>, Unit>, List<&2, Snap>,
+        Chan.try_recv(List<&2, Snap>, c, 500),
+        m => IO.pure(List<&2, Snap>, Keeper.answer(m)))))
+
+def Ctl.loop(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +spec: X.Spec,
   +chan: Chan(Msg), +status: Chan(SMsg), +idx: U32) -> IO(Unit):
   Ctl.run(~rec, 4294967295n,
-    CDisp{(CState{S.Store.new(), Q.Queue.new(max), Stats{0, 0, 0}}, Nil{})},
-    CState{S.Store.new(), Q.Queue.new(max), Stats{0, 0, 0}},
-    CCtx{cfg, Api.kind(primary), chan, status, idx})
-
-# Runs a controller (kube-runtime's Controller::new(..).owns(..).run(..)):
-# primary is watched (only objects matching the label selector, "" for
-# all) and reconciled, each of owned is watched and mapped to
-# its owners of primary's kind; at most max reconciles run at once. rec
-# answers what to do next for the object, as kube-runtime's Action. chan
-# is the controller's inbox (Controller.inbox); status receives a snapshot
-# after every step (Keeper.start).
-def Controller.start(~rec: J.Json -> K.Config -> IO(Q.Action), +cfg: K.Config, +primary: C.Api,
-  label: String, owned: List<&2, C.Api>, +max: U32, +chan: Chan(Msg), +status: Chan(SMsg)) ->
-  IO(Unit):
-  do IO<Unit>:
-    Ctl.watch(cfg, primary, label, 0, chan)
-    Ctl.watch_all(owned, 1, cfg, chan)
-    Ctl.loop(~(i => o => c => rec(o, c)), cfg, primary, max, chan, status, 0)
+    CDisp{(CState{S.Store.new(),
+      List.replicate(S.Store, List.length(&2, X.Sec, X.Spec.secs(spec)), S.Store.new()),
+      Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), 0}, None{}}, Nil{})},
+    CState{S.Store.new(), Nil{}, Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), 0},
+      None{}},
+    CCtx{cfg, spec, chan, status, idx})
 
 def Controller.inbox() -> IO(Chan(Msg)):
   Chan.new(Msg, 4096)
@@ -633,16 +740,35 @@ def Controller.inbox() -> IO(Chan(Msg)):
 # -------
 #
 # Several controllers in one process (controller-runtime's Manager, with
-# kube-runtime's shared reflectors): each runs its own loop, store and
+# kube-runtime's shared reflectors): each runs its own loop, caches and
 # queue, but a watch they share (the same resource, scope and label
 # selector) runs once, and its outputs fan out to every controller that
 # subscribed, so the API server sees one list and one watch per resource.
+# A lone controller is a manager of one.
 
-# A controller of a manager: its primary watch (with a label selector), the
-# kinds it owns, and how many reconciles it runs at once. A manager's
-# reconcile gets the controller's index (its place in the list) first.
+# The older way to name a controller: a primary with a label selector, the
+# kinds it owns, and how many reconciles run at once (X.Spec says more).
 type Ctrl is Data:
   Ctrl{primary: C.Api, label: String, owned: List<&2, C.Api>, max: U32}
+
+def Ctrl.owns(os: List<&2, C.Api>, s: X.Spec) -> X.Spec:
+  match os:
+    case Nil{}:
+      s
+    case Con{a, t}:
+      Ctrl.owns(t, X.Spec.owns(s, a))
+
+def Ctrl.spec(c: Ctrl) -> X.Spec:
+  match c:
+    case Ctrl{p, l, os, m}:
+      Ctrl.owns(os, X.Spec.max(X.Spec.label(X.Spec.of(p), l), m))
+
+def Ctrl.specs(cs: List<&2, Ctrl>) -> List<&2, X.Spec>:
+  match cs:
+    case Nil{}:
+      Nil{}
+    case Con{c, t}:
+      Ctrl.spec(c) <> Ctrl.specs(t)
 
 type Watch is Data:
   Watch{api: C.Api, label: String, subs: List<&2, Sub>}
@@ -670,28 +796,28 @@ def Plan.add(ws: List<&2, Watch>, +api: C.Api, +label: String, +sub: Sub, hit: B
 def Plan.sub(+ws: List<&2, Watch>, +api: C.Api, +label: String, +sub: Sub) -> List<&2, Watch>:
   Plan.add(ws, api, label, sub, Plan.hit(ws, Watch.key(api, label)))
 
-def Plan.owned(os: List<&2, C.Api>, +ch: Chan(Msg), +n: U32, ws: List<&2, Watch>) -> List<&2, Watch>:
-  match os:
+def Plan.secs(ss: List<&2, X.Sec>, +ch: Chan(Msg), +n: U32, ws: List<&2, Watch>) -> List<&2, Watch>:
+  match ss:
     case Nil{}:
       ws
-    case Con{a, t}:
-      Plan.owned(t, ch, (n + 1 : U32), Plan.sub(ws, a, "", Sub{ch, n}))
+    case Con{X.Sec{a, l, r}, t}:
+      Plan.secs(t, ch, (n + 1 : U32), Plan.sub(ws, a, l, Sub{ch, n}))
 
 # Every watch the controllers need, each once, with all its subscribers.
-def Plan.build(cs: List<&2, Ctrl>, chs: List<&2, Chan(Msg)>, ws: List<&2, Watch>) -> List<&2, Watch>:
+def Plan.build(cs: List<&2, X.Spec>, chs: List<&2, Chan(Msg)>, ws: List<&2, Watch>) -> List<&2, Watch>:
   match cs chs:
-    case Con{Ctrl{p, l, os, m}, t} Con{+ch, ct}:
-      Plan.build(t, ct, Plan.owned(os, ch, 1, Plan.sub(ws, p, l, Sub{ch, 0})))
+    case Con{X.Spec{p, l, ps, ss, m}, t} Con{+ch, ct}:
+      Plan.build(t, ct, Plan.secs(ss, ch, 1, Plan.sub(ws, p, l, Sub{ch, 0})))
     case _ _:
       ws
 
-def Manager.inboxes(cs: List<&2, Ctrl>) -> IO(List<&2, Chan(Msg)>):
-  match cs:
-    case Nil{}:
+def Manager.inboxes(+n: Nat) -> IO(List<&2, Chan(Msg)>):
+  match n:
+    case 0n:
       IO.pure(List<&2, Chan(Msg)>, Nil{})
-    case Con{c, t}:
+    case 1n+k:
       IO.bind(Chan(Msg), List<&2, Chan(Msg)>, Controller.inbox(),
-        ch => IO.bind(List<&2, Chan(Msg)>, List<&2, Chan(Msg)>, Manager.inboxes(t),
+        ch => IO.bind(List<&2, Chan(Msg)>, List<&2, Chan(Msg)>, Manager.inboxes(k),
           rest => IO.pure(List<&2, Chan(Msg)>, ch <> rest)))
 
 def Manager.watch(+cfg: K.Config, ws: List<&2, Watch>) -> IO(Unit):
@@ -701,19 +827,61 @@ def Manager.watch(+cfg: K.Config, ws: List<&2, Watch>) -> IO(Unit):
     case Con{Watch{a, l, ss}, t}:
       IO.bind(Unit, Unit, Ctl.watch.subs(cfg, a, l, ss), u => Manager.watch(cfg, t))
 
-def Manager.loops(~rec: U32 -> J.Json -> K.Config -> IO(Q.Action), +cfg: K.Config, cs: List<&2, Ctrl>,
+def Manager.loops(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, cs: List<&2, X.Spec>,
   chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +i: U32) -> IO(Unit):
   match cs chs:
-    case Con{Ctrl{p, l, os, m}, t} Con{ch, ct}:
-      IO.bind(Unit, Unit, IO.spawn(Unit, Ctl.loop(~rec, cfg, p, m, ch, status, i)),
+    case Con{s, t} Con{ch, ct}:
+      IO.bind(Unit, Unit, IO.spawn(Unit, Ctl.loop(~rec, cfg, s, ch, status, i)),
         u => Manager.loops(~rec, cfg, t, ct, status, (i + 1 : U32)))
     case _ _:
       IO.pure(Unit, Unit{})
 
-# Runs every controller, sharing their watches. rec(i, obj, cfg) reconciles
-# obj for controller i.
-def Manager.start(~rec: U32 -> J.Json -> K.Config -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, Ctrl>,
-  +status: Chan(SMsg)) -> IO(Unit):
-  IO.bind(List<&2, Chan(Msg)>, Unit, Manager.inboxes(cs),
-    +chs => IO.bind(Unit, Unit, Manager.watch(cfg, Plan.build(cs, chs, Nil{})),
-      u => Manager.loops(~rec, cfg, cs, chs, status, 0)))
+# Runs every controller on its inbox (Manager.inboxes), sharing their
+# watches. rec(obj, ctx) reconciles obj; X.Ctx.idx(ctx) names the
+# controller.
+def Manager.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
+  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg)) -> IO(Unit):
+  IO.bind(Unit, Unit, Manager.watch(cfg, Plan.build(cs, chs, Nil{})),
+    u => Manager.loops(~rec, cfg, cs, chs, status, 0))
+
+# Stopping
+# --------
+
+def Stop.ask(chs: List<&2, Chan(Msg)>) -> IO(List<&2, Chan(Unit)>):
+  match chs:
+    case Nil{}:
+      IO.pure(List<&2, Chan(Unit)>, Nil{})
+    case Con{ch, t}:
+      IO.bind(Chan(Unit), List<&2, Chan(Unit)>, Chan.new(Unit, 1),
+        +r => IO.bind(Result<&1, &1, Msg, Unit>, List<&2, Chan(Unit)>, Chan.send(Msg, ch, MStop{r}),
+          u => IO.bind(List<&2, Chan(Unit)>, List<&2, Chan(Unit)>, Stop.ask(t),
+            rest => IO.pure(List<&2, Chan(Unit)>, r <> rest))))
+
+def Stop.wait(rs: List<&2, Chan(Unit)>) -> IO(Unit):
+  match rs:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case Con{r, t}:
+      IO.bind(Maybe<&1, Unit>, Unit, Chan.recv(Unit, r), u => Stop.wait(t))
+
+def Stop.said(m: Maybe<&1, Unit>) -> IO(Unit):
+  match m:
+    case Some{u}:
+      L.Log.info("reconciles drained", Nil{})
+    case None{}:
+      L.Log.warn("reconciles still running at the grace deadline; stopping anyway", Nil{})
+
+def Stop.drain(chs: List<&2, Chan(Msg)>, +grace: U32, ss: List<&2, Snap>) -> IO(Unit):
+  match ss:
+    case Nil{}:
+      # a standby replica runs no controller
+      IO.pure(Unit, Unit{})
+    case xs:
+      IO.bind(Unit, Unit, L.Log.info("draining reconciles", [L.Log.kv("grace_ms", U32.show(grace))]),
+        u => IO.bind(List<&2, Chan(Unit)>, Unit, Stop.ask(chs),
+          rs => IO.bind(Maybe<&1, Unit>, Unit, IO.within(Unit, grace, Stop.wait(rs)), Stop.said)))
+
+# Asks every running controller to stop: no new reconciles start, and this
+# returns once the running ones finish, or after grace ms.
+def Manager.stop(chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +grace: U32) -> IO(Unit):
+  IO.bind(List<&2, Snap>, Unit, Keeper.query(status), ss => Stop.drain(chs, grace, ss))

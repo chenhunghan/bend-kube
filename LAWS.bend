@@ -8,6 +8,7 @@ import ./src/finalizer.bend as F
 import ./src/http.bend as H
 import ./src/utf8.bend as U
 import ./src/proxy.bend as P
+import ./src/control.bend as X
 
 # LAWS
 # ====
@@ -302,3 +303,94 @@ law tunnel_end_before_answer:
   for h: List<&2, U32>
   {P.Tunnel.feed(P.TMore{h}, Nil{})
     == P.TFail{"proxy closed the connection before answering CONNECT"} : P.Tunnel}
+
+# Controllers (kube-runtime's predicates and trigger mappers)
+# ----------------------------------------------------------
+
+# An object with a generation, a version, a deletion stamp and a status,
+# for the laws below.
+def Ex.obj(gen: J.Json, rv: String, del: J.Json, st: J.Json) -> J.Json:
+  J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"w"}},
+    J.KV{"namespace", J.JStr{"default"}}, J.KV{"generation", gen},
+    J.KV{"resourceVersion", J.JStr{rv}}, J.KV{"deletionTimestamp", del}])}, J.KV{"status", st}])
+
+# Without predicates, every change reconciles.
+law filter_none_passes:
+  for old: Maybe<&2, J.Json>
+  for new: J.Json
+  {X.Pred.passes(Nil{}, old, new) == True{} : Bool}
+
+# With predicates, an object the cache has not seen always reconciles.
+law filter_uncached_passes:
+  for p: X.Pred
+  for ps: List<&2, X.Pred>
+  for new: J.Json
+  {X.Pred.passes(p <> ps, None{}, new) == True{} : Bool}
+
+# Under the generation predicate, a change that leaves the generation alone
+# (a status write, whatever its version) does not reconcile: a controller's
+# own status updates do not wake it.
+law filter_same_generation_skips:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNum{"3"}, r1, J.JNull{}, a)},
+    Ex.obj(J.JNum{"3"}, r2, J.JNull{}, b)) == False{} : Bool}
+
+# A new generation (a spec change) reconciles.
+law filter_generation_passes:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNum{"3"}, r1, J.JNull{}, a)},
+    Ex.obj(J.JNum{"4"}, r2, J.JNull{}, b)) == True{} : Bool}
+
+# The start of a deletion reconciles, whatever the predicates, so a
+# finalizer is never missed.
+law filter_deletion_passes:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  for t: String
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNum{"3"}, r1, J.JNull{}, a)},
+    Ex.obj(J.JNum{"3"}, r2, J.JStr{t}, b)) == True{} : Bool}
+
+# An object without a generation (a ConfigMap) reconciles on every change.
+law filter_no_generation_passes:
+  for a: J.Json
+  for b: J.Json
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNull{}, "1", J.JNull{}, a)},
+    Ex.obj(J.JNull{}, "2", J.JNull{}, b)) == True{} : Bool}
+
+# Without predicates, an applied primary is cached and reconciles.
+law fold_apply_triggers:
+  for x: J.Json
+  for s: S.Store
+  for ks: List<&2, String>
+  for g: List<&2, String>
+  {X.Fold.prim(Nil{}, [W.OApply{x}], X.Fold{s, ks, g})
+    == X.Fold{S.Store.apply(s, W.OApply{x}), C.Obj.key(x) <> ks, g} : X.Fold}
+
+# A deleted primary leaves the cache, reconciles nothing, and is forgotten.
+law fold_delete_forgets:
+  for ps: List<&2, X.Pred>
+  for x: J.Json
+  for s: S.Store
+  for ks: List<&2, String>
+  for g: List<&2, String>
+  {X.Fold.prim(ps, [W.ODelete{x}], X.Fold{s, ks, g})
+    == X.Fold{S.Store.apply(s, W.ODelete{x}), ks, C.Obj.key(x) <> g} : X.Fold}
+
+# An owned object reconciles the owner of the primary's kind it names, in
+# its own namespace (kube-runtime's trigger_owners).
+law owner_triggers_owner:
+  for prim: S.Store
+  {X.Rel.keys(X.ROwner{}, "Website",
+    J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"w-web"}},
+      J.KV{"namespace", J.JStr{"default"}},
+      J.KV{"ownerReferences", J.Json.arr([J.Json.obj([J.KV{"kind", J.JStr{"Website"}},
+        J.KV{"name", J.JStr{"w"}}])])}])}]), prim)
+    == ["default/w"] : List<&2, String>}

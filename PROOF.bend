@@ -140,3 +140,30 @@ def Laws.tunnel_rejects_early_bytes(b, bs):
 
 def Laws.tunnel_end_before_answer(h):
   {==}
+
+def Laws.filter_none_passes(old, new):
+  {==}
+
+def Laws.filter_uncached_passes(p, ps, new):
+  {==}
+
+def Laws.filter_same_generation_skips(r1, r2, a, b):
+  {==}
+
+def Laws.filter_generation_passes(r1, r2, a, b):
+  {==}
+
+def Laws.filter_deletion_passes(r1, r2, a, b, t):
+  {==}
+
+def Laws.filter_no_generation_passes(a, b):
+  {==}
+
+def Laws.fold_apply_triggers(x, s, ks, g):
+  {==}
+
+def Laws.fold_delete_forgets(ps, x, s, ks, g):
+  {==}
+
+def Laws.owner_triggers_owner(prim):
+  {==}

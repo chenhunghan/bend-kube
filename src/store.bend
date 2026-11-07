@@ -9,7 +9,8 @@ import ./watcher.bend as W
 # kube-runtime's reflector Store, keyed as client-go's cache is ("ns/name"
 # or "name"). A relist builds a fresh buffer between Init and InitDone and
 # swaps it in whole, so an object deleted while the watch was down leaves
-# the store with the relist (kube-runtime's buffered reflector).
+# the store with the relist (kube-runtime's buffered reflector). Objects
+# are kept without metadata.managedFields (Store.slim).
 
 type Store is Data:
   Store{objs: Map<&2, J.Json>, buf: Map<&2, J.Json>, ready: Bool}
@@ -17,16 +18,23 @@ type Store is Data:
 def Store.new() -> Store:
   Store{Map.new(&2, J.Json), Map.new(&2, J.Json), False{}}
 
+# What the store keeps of an object: all but metadata.managedFields, the
+# server-side apply bookkeeping that is often half an object's size and
+# that controllers do not read (kube-rs's and controller-runtime's usual
+# cache transform).
+def Store.slim(+x: J.Json) -> J.Json:
+  J.Json.set(x, "metadata", J.Json.del(J.Json.get(x, "metadata"), "managedFields"))
+
 def Store.apply(s: Store, o: W.Out) -> Store:
   match s o:
     case Store{objs, buf, r} W.OInit{}:
       Store{objs, Map.new(&2, J.Json), r}
     case Store{objs, buf, r} W.OInitApply{+x}:
-      Store{objs, Map.set(&2, J.Json, buf, C.Obj.key(x), x), r}
+      Store{objs, Map.set(&2, J.Json, buf, C.Obj.key(x), Store.slim(x)), r}
     case Store{objs, buf, r} W.OInitDone{}:
       Store{buf, Map.new(&2, J.Json), True{}}
     case Store{objs, buf, r} W.OApply{+x}:
-      Store{Map.set(&2, J.Json, objs, C.Obj.key(x), x), buf, r}
+      Store{Map.set(&2, J.Json, objs, C.Obj.key(x), Store.slim(x)), buf, r}
     case Store{objs, buf, r} W.ODelete{+x}:
       Store{Map.del(&2, J.Json, objs, C.Obj.key(x)), buf, r}
 

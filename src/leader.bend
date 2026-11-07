@@ -15,7 +15,7 @@ import ./lease.bend as E
 # defaults: a 15s lease, renewed every 2s, given up when no renewal lands
 # for 10s. Losing the lease exits the process (status 1), as client-go's
 # usual OnStoppedLeading does, so two leaders never act at once; SIGTERM
-# hands the lease back (status 0).
+# drains the running reconciles and hands the lease back (status 0).
 
 type LOpts is Data:
   LOpts{ns: String, name: String, id: String, dur: U32, deadline: U32, retry: U32}
@@ -159,13 +159,16 @@ def Leader.release(+cfg: K.Config, +o: LOpts) -> IO(Unit):
     w => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
       Cl.Client.get(cfg, LOpts.api(o), LOpts.name(o)), r => Leader.release.got(r, cfg, o, T.Wall.of(w))))
 
-# On SIGTERM or SIGINT: release the lease, then exit 0.
-def Leader.on_signal(+cfg: K.Config, +o: LOpts) -> IO(Unit):
+# On SIGTERM or SIGINT: drain (stop starting reconciles and wait for the
+# running ones, up to the grace period), release the lease, then exit 0.
+def Leader.on_signal(+cfg: K.Config, +o: LOpts, drain: IO(Unit)) -> IO(Unit):
   IO.bind(U32, Unit, Y.Sys.signal(),
     sig => IO.bind(Unit, Unit, L.Log.info("terminating", [L.Log.kv("signal", U32.show(sig))]),
-      u => IO.bind(Unit, Unit, Leader.release(cfg, o), u2 => IO.exit(0))))
+      u => IO.bind(Unit, Unit, drain,
+        u1 => IO.bind(Unit, Unit, Leader.release(cfg, o), u2 => IO.exit(0)))))
 
-# Runs work only while we hold the lease (client-go's RunOrDie).
-def Leader.elect(+cfg: K.Config, +o: LOpts, work: IO(Unit)) -> IO(Unit):
-  IO.bind(Unit, Unit, IO.spawn(Unit, Leader.on_signal(cfg, o)),
+# Runs work only while we hold the lease (client-go's RunOrDie); drain runs
+# on SIGTERM before the lease is handed back.
+def Leader.elect(+cfg: K.Config, +o: LOpts, drain: IO(Unit), work: IO(Unit)) -> IO(Unit):
+  IO.bind(Unit, Unit, IO.spawn(Unit, Leader.on_signal(cfg, o, drain)),
     u => Leader.run(4294967295n, LTry{}, cfg, o, E.Obs.none(), False{}, 0, Some{work}))

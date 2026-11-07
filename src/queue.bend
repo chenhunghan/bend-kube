@@ -260,3 +260,9 @@ def Queue.forget_all(ks: List<&2, String>, q: Queue) -> Queue:
       q
     case Con{k, t}:
       Queue.forget_all(t, Queue.forget(q, k))
+
+# How many keys wait to run.
+def Queue.depth(q: Queue) -> U32:
+  match q:
+    case Queue{f, b, i, r, d, g, fl, n, mx}:
+      U32.from_nat(Map.size(&2, U32, i))

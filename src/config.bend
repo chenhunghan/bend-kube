@@ -23,18 +23,20 @@ type Src is Data:
 
 # pool: idle keep-alive connections to reuse (client.bend), when the
 # program made one (Config.with_pool); None opens one per request.
+# limit: the client's rate limit, a bucket of tokens a request takes one of
+# (client.bend's Limit), when the program made one (Config.with_limit).
 type Config is Data:
   Config{host: String, port: U32, base: String, ca: Src, cert: Src, key: Src, token: Src,
-    namespace: String, pool: Maybe<&2, Chan(Socket)>}
+    namespace: String, pool: Maybe<&2, Chan(Socket)>, limit: Maybe<&2, Chan(Unit)>}
 
 def Config.host(c: Config) -> String:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
       h
 
 def Config.namespace(c: Config) -> String:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
       ns
 
 # Server URLs
@@ -212,7 +214,7 @@ def Kube.config.fin(u: Url, ca: Src, cert: Src, key: Src, tok: Src, ns: String) 
   Result<&2, &2, String, Config>:
   match u:
     case Url{h, p, b}:
-      Done{Config{h, p, b, ca, cert, key, tok, ns, None{}}}
+      Done{Config{h, p, b, ca, cert, key, tok, ns, None{}, None{}}}
 
 def Kube.config.server(s: J.Json, ca: Src, cert: Src, key: Src, tok: Src, ns: String) ->
   Result<&2, &2, String, Config>:
@@ -257,7 +259,7 @@ def InCluster.dir() -> String:
 # (client-go's InClusterConfig). An IPv6 host needs no brackets here.
 def InCluster.config(host: String, port: String, ns: String) -> Config:
   Config{host, Url.port(port, 443), "", FromFile{InCluster.dir() ++ "/ca.crt"}, NoSrc{}, NoSrc{},
-    FromFile{InCluster.dir() ++ "/token"}, String.trim(ns), None{}}
+    FromFile{InCluster.dir() ++ "/token"}, String.trim(ns), None{}, None{}}
 
 # Merging and paths
 # -----------------
@@ -366,10 +368,20 @@ def Kube.dir(+p: String) -> String:
 
 def Config.with_pool(c: Config, pool: Chan(Socket)) -> Config:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl}:
-      Config{h, p, b, ca, cert, key, tok, ns, Some{pool}}
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
+      Config{h, p, b, ca, cert, key, tok, ns, Some{pool}, lm}
 
 def Config.pool(c: Config) -> Maybe<&2, Chan(Socket)>:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
       pl
+
+def Config.with_limit(c: Config, limit: Chan(Unit)) -> Config:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
+      Config{h, p, b, ca, cert, key, tok, ns, pl, Some{limit}}
+
+def Config.limit(c: Config) -> Maybe<&2, Chan(Unit)>:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
+      lm

@@ -79,7 +79,7 @@ def Serve.all_ready(ss: List<&2, R.Snap>) -> Bool:
   match ss:
     case Nil{}:
       True{}
-    case Con{R.Snap{nm, r, a, b, c, d, e}, t}:
+    case Con{R.Snap{nm, r, a, b, c, d, e, q, h, sm}, t}:
       Bool.and(r, Serve.all_ready(t))
 
 def Serve.ready.go(standby: Bool, ready: Bool) -> String:
@@ -107,35 +107,53 @@ def Serve.head(+name: String, kind: String, help: String) -> String:
 
 def Serve.snap.name(s: R.Snap) -> String:
   match s:
-    case R.Snap{n, r, a, b, c, d, e}:
+    case R.Snap{n, r, a, b, c, d, e, q, h, sm}:
       n
 
-def Serve.snap.pick.go(r: Bool, +a: U32, +b: U32, +c: U32, +d: U32, +e: U32, i0: Bool, i1: Bool,
-  i2: Bool, i3: Bool, i4: Bool) -> String:
-  match i0 i1 i2 i3 i4:
-    case True{} _ _ _ _:
-      Serve.bool(r)
-    case False{} True{} _ _ _:
-      U32.show(a)
-    case False{} False{} True{} _ _:
-      U32.show(b)
-    case False{} False{} False{} True{} _:
-      U32.show(c)
-    case False{} False{} False{} False{} True{}:
-      U32.show(d)
-    case _ _ _ _ _:
-      U32.show(e)
-
-def Serve.snap.pick(+i: U32, r: Bool, +a: U32, +b: U32, +c: U32, +d: U32, +e: U32) -> String:
-  Serve.snap.pick.go(r, a, b, c, d, e, U32.is_eq(i, 0), U32.is_eq(i, 1), U32.is_eq(i, 2),
-    U32.is_eq(i, 3), U32.is_eq(i, 4))
+def Serve.nth(xs: List<&2, String>, n: Nat) -> String:
+  match xs n:
+    case Nil{} k:
+      "0"
+    case Con{x, t} 0n:
+      x
+    case Con{x, t} 1n+k:
+      Serve.nth(t, k)
 
 # The field-th number of a snapshot (0 ready, 1 reconciles, 2 errors,
-# 3 events, 4 running, 5 objects).
+# 3 events, 4 running, 5 objects, 6 queued).
 def Serve.snap.field(s: R.Snap, +i: U32) -> String:
   match s:
-    case R.Snap{n, r, +a, +b, +c, +d, +e}:
-      Serve.snap.pick(i, r, a, b, c, d, e)
+    case R.Snap{n, r, a, b, c, d, e, q, h, sm}:
+      Serve.nth([Serve.bool(r), U32.show(a), U32.show(b), U32.show(c), U32.show(d), U32.show(e),
+        U32.show(q)], U32.to_nat(i))
+
+# Reconcile durations as a Prometheus histogram: cumulative buckets in
+# seconds, the sum and the count.
+def Serve.les() -> List<&2, String>:
+  ["0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "+Inf"]
+
+def Serve.buckets(+name: String, +ctl: String, les: List<&2, String>, cs: List<&2, U32>,
+  +acc: U32) -> String:
+  match les cs:
+    case Con{le, lt} Con{+c, ct}:
+      name ++ "_bucket{controller=\"" ++ ctl ++ "\",le=\"" ++ le ++ "\"} " ++ U32.show((acc + c : U32))
+        ++ "\n" ++ Serve.buckets(name, ctl, lt, ct, (acc + c : U32))
+    case _ _:
+      name ++ "_count{controller=\"" ++ ctl ++ "\"} " ++ U32.show(acc) ++ "\n"
+
+def Serve.pad3(+n: U32) -> String:
+  String.drop(U32.show((n + 1000 : U32)), 1n)
+
+def Serve.secs(+ms: U32) -> String:
+  U32.show((ms / 1000 : U32)) ++ "." ++ Serve.pad3((ms % 1000 : U32))
+
+def Serve.hist(ss: List<&2, R.Snap>, +name: String) -> String:
+  match ss:
+    case Nil{}:
+      ""
+    case Con{R.Snap{+n, r, a, b, c, d, e, q, h, sm}, t}:
+      Serve.buckets(name, n, Serve.les(), h, 0)
+        ++ name ++ "_sum{controller=\"" ++ n ++ "\"} " ++ Serve.secs(sm) ++ "\n" ++ Serve.hist(t, name)
 
 # One sample per controller, labeled with its kind.
 def Serve.samples(ss: List<&2, R.Snap>, +name: String, +field: U32) -> String:
@@ -159,7 +177,10 @@ def Serve.text(+ss: List<&2, R.Snap>) -> String:
     ++ Serve.family(ss, "bendkube_watch_events_total", "counter", "Watcher outputs received.", 3)
     ++ Serve.family(ss, "bendkube_reconcile_running", "gauge", "Reconciles running now.", 4)
     ++ Serve.family(ss, "bendkube_store_objects", "gauge", "Objects in the primary store.", 5)
-    ++ Serve.family(ss, "bendkube_store_ready", "gauge", "Whether the primary store has listed.", 0)
+    ++ Serve.family(ss, "bendkube_store_ready", "gauge", "Whether every cache has listed.", 0)
+    ++ Serve.family(ss, "bendkube_queue_depth", "gauge", "Keys waiting to reconcile.", 6)
+    ++ Serve.head("bendkube_reconcile_duration_seconds", "histogram", "How long reconciles take.")
+    ++ Serve.hist(ss, "bendkube_reconcile_duration_seconds")
 
 def Serve.metrics(+ss: List<&2, R.Snap>) -> String:
   Serve.reply(200, "text/plain; version=0.0.4", Serve.text(ss))
