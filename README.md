@@ -182,8 +182,9 @@ transforms kube-rs and controller-runtime users apply by hand.
 - **Errors:** a reconcile answers `Retry{msg}` to back off, or
   `RetryIn{msg, ms}` when it chooses the delay itself. After a failed call,
   `Cl.KErr.action(e)` picks for it. It answers `RetryIn` with the delay the
-  server named (a 429's `details.retryAfterSeconds`, kept as
-  `Cl.KErr.retry_after`), and `Retry` otherwise. Both are logged as
+  server named, and `Retry` otherwise. The delay is the Status body's
+  `details.retryAfterSeconds`, else the `Retry-After` header (in seconds,
+  so a proxy's plain 429 counts too); `Cl.KErr.retry_after` exposes it. Both are logged as
   warnings with the key and count as errors. `Hold{ms}` means "not done
   yet, look again after ms" and isn't an error. `Cl.KErr` has
   `is_conflict`, `is_not_found`, `is_already_exists` and `is_throttled`.
@@ -269,6 +270,10 @@ deadline):
   status 0, so failover takes milliseconds after the drain. The release
   reads the Lease afresh and retries if a renewal raced it (a 409), up to
   three times within 4s, and logs the outcome.
+- Election timing is checked at startup, as client-go checks it. Every
+  setting must be above zero, the lease must outlast the renew deadline,
+  and the deadline must exceed 1.2 retry periods. Unsafe timing stops the
+  process with the reason.
 - `Opts.with_election(o, ns, name)` names each replica by its pod
   (`HOSTNAME`) plus a random suffix. Two replicas can't share an identity,
   which would let both renew. `Opts.with_lease(o, E.LOpts{..})` sets the
@@ -424,7 +429,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 57 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 59 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -471,7 +476,9 @@ loop.
   - our clock stepping back doesn't expire it;
   - unchanged past its duration, it can be taken;
   - our own Lease is renewed, and a released one is free.
-  - another holder's Lease lasts its own recorded duration.
+  - another holder's Lease lasts its own recorded duration;
+  - the default timing is accepted, and a lease no longer than its renew
+    deadline is refused.
 - **Finalizer cleanup:** a failed or held cleanup keeps the finalizer, and
   a finished one releases it.
 - **Conditions:** setting a condition with an unchanged status keeps its

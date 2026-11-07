@@ -124,7 +124,10 @@ def failed.of(r: Result<&2, &2, Cl.KErr, J.Json>) -> String:
       "no error"
 
 def failed(+code: U32, body: String) -> String:
-  failed.of(Cl.Client.json.of(Done{Cl.Reply{code, body}}))
+  failed.of(Cl.Client.json.of(Done{Cl.Reply{code, body, None{}}}))
+
+def failed_h(+code: U32, body: String, +secs: U32) -> String:
+  failed.of(Cl.Client.json.of(Done{Cl.Reply{code, body, Some{secs}}}))
 
 def waits(st: R.CState, +key: String) -> Bool:
   match st:
@@ -172,6 +175,7 @@ def main() -> IO(Unit):
         "syncs_total{b=\"c\"}", 1), "keys", 2),
       Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "syncs_total", 0), "keys", 1)))
     IO.print("a 429 naming its delay: " ++ failed(429, "{\"kind\": \"Status\", \"code\": 429, \"reason\": \"TooManyRequests\", \"message\": \"slow down\", \"details\": {\"retryAfterSeconds\": 7}}"))
+    IO.print("a proxy's 429, Retry-After: 4 and a text body: " ++ failed_h(429, "Too Many Requests", 4))
     IO.print("a 500 without one: " ++ failed(500, "{\"kind\": \"Status\", \"code\": 500, \"reason\": \"InternalError\", \"message\": \"boom\"}"))
     IO.print("reconcile timed out: " ++ action(R.Ctl.timed_out(5000, None{})))
     IO.print("tokens in the first second (a fraction carries over) at qps 1, 3, 7, 50, 75, 333, 1000: " ++ tokens(1, 100) ++ " "

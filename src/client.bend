@@ -32,7 +32,7 @@ type KErr is Data:
   KDecode{msg: String}
 
 type Reply is Data:
-  Reply{status: U32, body: String}
+  Reply{status: U32, body: String, retry: Maybe<&2, U32>}
 
 def KErr.show(e: KErr) -> String:
   match e:
@@ -377,10 +377,19 @@ def Conn.read(fuel: Nat, ev: ReadEv, +resp: H.Resp, +ms: U32) -> IO(Socket & H.R
 # Calls
 # -----
 
+# A Retry-After header in seconds (the form the API server sends); an
+# HTTP-date one is left to the usual backoff.
+def Reply.retry_after(m: Maybe<&2, String>) -> Maybe<&2, U32>:
+  match m:
+    case Some{v}:
+      U32.read(String.trim(v))
+    case None{}:
+      None{}
+
 def Reply.of(r: H.Resp & List<&2, U32>) -> Result<&2, &2, KErr, Reply>:
   match r:
-    case (H.Resp{H.PDone{}, Some{H.Head{c, reason, hs}}, o}, body):
-      Done{Reply{c, U.Utf8.decode_all(body)}}
+    case (H.Resp{H.PDone{}, Some{H.Head{c, reason, +hs}}, o}, body):
+      Done{Reply{c, U.Utf8.decode_all(body), Reply.retry_after(H.Http.find(hs, "retry-after"))}}
     case (H.Resp{H.PErr{m}, h, o}, body):
       Fail{KNet{0, m}}
     case (H.Resp{H.PLost{m}, h, o}, body):
@@ -635,7 +644,16 @@ def Client.json.err(s: C.Status, m: Maybe<&2, U32>) -> KErr:
     case None{}:
       KApi{s}
 
-def Client.json.status(+c: U32, j: Result<&2, &2, String, J.Json>, ok: Bool) ->
+def Client.json.or(m: Maybe<&2, U32>, h: Maybe<&2, U32>) -> Maybe<&2, U32>:
+  match m:
+    case Some{n}:
+      Some{n}
+    case None{}:
+      h
+
+# h: the Retry-After header; the Status body's details.retryAfterSeconds
+# wins when both name a delay.
+def Client.json.status(+c: U32, j: Result<&2, &2, String, J.Json>, ok: Bool, h: Maybe<&2, U32>) ->
   Result<&2, &2, KErr, J.Json>:
   match j ok:
     case Done{x} True{}:
@@ -644,15 +662,15 @@ def Client.json.status(+c: U32, j: Result<&2, &2, String, J.Json>, ok: Bool) ->
       Fail{KDecode{m}}
     case Done{+x} False{}:
       Fail{Client.json.err(Client.json.status.fix(c, C.Status.of(x)),
-        J.Json.as_u32(J.Json.at(x, ["details", "retryAfterSeconds"])))}
+        Client.json.or(J.Json.as_u32(J.Json.at(x, ["details", "retryAfterSeconds"])), h))}
     case Fail{m} False{}:
-      Fail{KApi{C.Status{c, "", "non-JSON error body"}}}
+      Fail{Client.json.err(C.Status{c, "", "non-JSON error body"}, h)}
 
 # A 2xx reply's body as JSON; any other status as the Status it carries.
 def Client.json.of(r: Result<&2, &2, KErr, Reply>) -> Result<&2, &2, KErr, J.Json>:
   match r:
-    case Done{Reply{+c, body}}:
-      Client.json.status(c, J.Json.parse(body), Bool.and(U32.is_ge(c, 200), U32.is_lt(c, 300)))
+    case Done{Reply{+c, body, h}}:
+      Client.json.status(c, J.Json.parse(body), Bool.and(U32.is_ge(c, 200), U32.is_lt(c, 300)), h)
     case Fail{e}:
       Fail{e}
 

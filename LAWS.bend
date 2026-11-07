@@ -503,6 +503,15 @@ law filter_new_uid_passes:
       J.Json.set(J.Json.get(Ex.obj(J.JNum{"1"}, r2, J.JNull{}, b), "metadata"), "uid", J.JStr{"u2"})))
     == True{} : Bool}
 
+# The default election timing (15s lease, 10s renew deadline, 2s retry) is
+# accepted; a lease no longer than its renew deadline is refused.
+law lease_default_timing_ok:
+  {E.Lease.timing(15, 10000, 2000) == None{} : Maybe<&2, String>}
+
+law lease_short_lease_refused:
+  {E.Lease.timing(5, 10000, 2000)
+    == Some{"leader election: the lease duration must be longer than the renew deadline"} : Maybe<&2, String>}
+
 # Conditions (apimachinery's meta.SetStatusCondition)
 # ---------------------------------------------------
 
