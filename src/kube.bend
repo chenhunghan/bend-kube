@@ -83,12 +83,12 @@ def Opts.with_rate(o: Opts, qps: U32, burst: U32) -> Opts:
     case Opts{m, p, l, s, g, q, b}:
       Opts{m, p, l, s, g, qps, burst}
 
-def Kube.serve.go(+port: U32, +status: Chan(R.SMsg), off: Bool) -> IO(Unit):
+def Kube.serve.go(+port: U32, +status: Chan(R.SMsg), +meter: Chan(X.Meter), off: Bool) -> IO(Unit):
   match off:
     case True{}:
       IO.pure(Unit, Unit{})
     case False{}:
-      IO.spawn(Unit, V.Serve.run(port, status))
+      IO.spawn(Unit, V.Serve.run(port, status, meter))
 
 def Kube.port.of(+port: U32, e: Result<&1, &1, U32 & String, String>) -> U32:
   match e:
@@ -97,22 +97,22 @@ def Kube.port.of(+port: U32, e: Result<&1, &1, U32 & String, String>) -> U32:
     case Fail{x}:
       port
 
-def Kube.serve.at(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):
-  Kube.serve.go(port, status, U32.is_eq(port, 0))
+def Kube.serve.at(+port: U32, +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
+  Kube.serve.go(port, status, meter, U32.is_eq(port, 0))
 
 # The health and metrics port: BEND_KUBE_PORT when set (0 for none), else
 # Opts.port.
-def Kube.serve(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):
+def Kube.serve(+port: U32, +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
   IO.bind(Result<&1, &1, U32 & String, String>, Unit, IO.get_env("BEND_KUBE_PORT"),
-    e => Kube.serve.at(Kube.port.of(port, e), status))
+    e => Kube.serve.at(Kube.port.of(port, e), status, meter))
 
 # Without leader election: on SIGTERM or SIGINT, drain, then exit 0; a
 # second signal exits at once.
-def Kube.on_signal(drain: IO(Unit)) -> IO(Unit):
+def Kube.on_signal(drain: IO(Bool)) -> IO(Unit):
   IO.bind(U32, Unit, Y.Sys.signal(),
     sig => IO.bind(Unit, Unit, L.Log.info("terminating", [L.Log.kv("signal", U32.show(sig))]),
       u => IO.bind(Unit, Unit, IO.spawn(Unit, E.Leader.again()),
-        u1 => IO.bind(Unit, Unit, drain, u2 => IO.exit(0)))))
+        u1 => IO.bind(Bool, Unit, drain, d => IO.exit(0)))))
 
 def Kube.ident.of(h: Result<&1, &1, U32 & String, String>, r: Result<&1, &1, U32 & String, U32>) ->
   String:
@@ -132,7 +132,7 @@ def Kube.ident() -> IO(String):
     h => IO.bind(Result<&1, &1, U32 & String, U32>, String, IO.random_u32(),
       r => IO.pure(String, Kube.ident.of(h, r))))
 
-def Kube.elect.as(+cfg: K.Config, lo: E.LOpts, drain: IO(Unit), work: IO(Unit), auto: Bool) -> IO(Unit):
+def Kube.elect.as(+cfg: K.Config, lo: E.LOpts, drain: IO(Bool), work: IO(Unit), auto: Bool) -> IO(Unit):
   match lo auto:
     case E.LOpts{ns, n, id, d, dl, rt} True{}:
       IO.bind(String, Unit, Kube.ident(),
@@ -141,7 +141,7 @@ def Kube.elect.as(+cfg: K.Config, lo: E.LOpts, drain: IO(Unit), work: IO(Unit), 
     case x False{}:
       E.Leader.elect(cfg, x, drain, work)
 
-def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Unit), work: IO(Unit)) -> IO(Unit):
+def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Bool), work: IO(Unit)) -> IO(Unit):
   match l:
     case Some{+lo}:
       Kube.elect.as(cfg, lo, drain, work, String.is_empty(E.LOpts.id(lo)))
@@ -156,13 +156,13 @@ def Kube.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +ecfg: K.C
     case Opts{m, +p, l, sel, +grace, q, b}:
       IO.bind(List<&2, Chan(R.Msg)>, Unit, R.Manager.inboxes(List.length(&2, X.Spec, specs)),
         +chs => IO.bind(Chan(R.SMsg), Unit, R.Keeper.start(),
-          +status => IO.bind(Chan(Unit), Unit, R.Manager.started(),
-            +started => IO.bind(Unit, Unit, Kube.serve(p, status),
+          +status => IO.bind(Chan(Unit), Unit, R.Manager.gate(),
+            +gate => IO.bind(Chan(X.Meter), Unit, R.Meter.start(), +meter => IO.bind(Unit, Unit, Kube.serve(p, status, meter),
               u => IO.bind(Unit, Unit, L.Log.info("starting controllers",
                 [L.Log.kv("count", Nat.show(List.length(&2, X.Spec, specs))),
                   L.Log.kv("server", K.Config.host(cfg))]),
-                u2 => Kube.elect(ecfg, l, R.Manager.stop(chs, started, grace),
-                  R.Manager.start(~rec, cfg, specs, chs, status, started)))))))
+                u2 => Kube.elect(ecfg, l, R.Manager.stop(chs, gate, grace),
+                  R.Manager.start(~rec, cfg, specs, chs, status, meter, gate))))))))
 
 # Up to 8 idle keep-alive connections shared by every request.
 def Kube.pool() -> IO(Chan(Socket)):

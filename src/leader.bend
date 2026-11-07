@@ -138,6 +138,16 @@ def Leader.started(leading: Bool, start: Maybe<&1, IO(Unit)>) -> IO(Unit):
 def Leader.lost() -> IO(Unit):
   IO.bind(Unit, Unit, L.Log.error("leader lease lost; exiting", Nil{}), u => IO.exit(1))
 
+# A leader's renewal that landed only after the renew deadline counts as
+# lost (client-go's RenewDeadline): a standby may already have judged the
+# lease expired.
+def Leader.renewed(late: Bool, go: IO(Unit)) -> IO(Unit):
+  match late:
+    case True{}:
+      Leader.lost()
+    case False{}:
+      go
+
 # The election loop. start runs once, when the lease is first ours.
 def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: E.Obs, +leading: Bool,
   +last: U32, start: Maybe<&1, IO(Unit)>) -> IO(Unit):
@@ -154,7 +164,8 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
       IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
         Leader.timed(Leader.room(m, last, LOpts.deadline(o), leading),
           Cl.Client.get(cfg, LOpts.api(o), LOpts.name(o))),
-        r => Leader.run(oc, f, LRead{w, m, r}, cfg, o, obs, leading, last, start))
+        r => IO.bind(U32, Unit, Leader.mono(),
+          m2 => Leader.run(oc, f, LRead{w, m2, r}, cfg, o, obs, leading, last, start)))
     case oc 1n+f LRead{+w, +m, r}:
       Leader.run(oc, f, LDecided{m, Leader.decide(Leader.read(r), o, obs, m, w)}, cfg, o, obs,
         leading, last, start)
@@ -181,9 +192,10 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
         m2 => Leader.run(oc, f, LWrote{now, ok, Leader.late(m2, last, LOpts.deadline(o))},
           cfg, o, obs, leading, last, start))
     case oc 1n+f LWrote{now, True{}, late}:
-      IO.bind(Unit, Unit, Leader.started(leading, start),
-        u => IO.bind(Unit, Unit, IO.sleep(LOpts.retry(o)),
-          u2 => Leader.run(oc, f, LTry{}, cfg, o, obs, True{}, now, None{})))
+      Leader.renewed(Bool.and(leading, late),
+        IO.bind(Unit, Unit, Leader.started(leading, start),
+          u => IO.bind(Unit, Unit, IO.sleep(LOpts.retry(o)),
+            u2 => Leader.run(oc, f, LTry{}, cfg, o, obs, True{}, now, None{}))))
     case oc 1n+f LWrote{now, False{}, late}:
       Leader.run(oc, f, LFail{Bool.and(leading, late)}, cfg, o, obs, leading, last, start)
     case oc 1n+f LFail{True{}}:
@@ -251,16 +263,27 @@ def Leader.again() -> IO(Unit):
   IO.bind(U32, Unit, Y.Sys.signal(),
     sig => IO.bind(Unit, Unit, L.Log.warn("second signal; exiting now", Nil{}), u => IO.exit(1)))
 
+# The lease goes back only after a clean drain. A reconcile still running
+# past the grace period could otherwise overlap the next leader's; the
+# process exits holding the lease, which expires after its duration.
+def Leader.handover(+cfg: K.Config, +o: LOpts, drained: Bool) -> IO(Unit):
+  match drained:
+    case True{}:
+      IO.bind(Unit, Unit, Leader.release(cfg, o), u => IO.exit(0))
+    case False{}:
+      IO.exit(0)
+
 # On SIGTERM or SIGINT: drain (stop starting reconciles and wait for the
-# running ones, up to the grace period), release the lease, then exit 0.
-def Leader.on_signal(+cfg: K.Config, +o: LOpts, drain: IO(Unit)) -> IO(Unit):
+# running ones, up to the grace period), hand the lease back if nothing is
+# left running, then exit 0; a second signal exits at once.
+def Leader.on_signal(+cfg: K.Config, +o: LOpts, drain: IO(Bool)) -> IO(Unit):
   IO.bind(U32, Unit, Y.Sys.signal(),
     sig => IO.bind(Unit, Unit, L.Log.info("terminating", [L.Log.kv("signal", U32.show(sig))]),
-      u => IO.bind(Unit, Unit, IO.spawn(Unit, Leader.again()), u0 => IO.bind(Unit, Unit, drain,
-        u1 => IO.bind(Unit, Unit, Leader.release(cfg, o), u2 => IO.exit(0))))))
+      u => IO.bind(Unit, Unit, IO.spawn(Unit, Leader.again()),
+        u0 => IO.bind(Bool, Unit, drain, d => Leader.handover(cfg, o, d)))))
 
 # Runs work only while we hold the lease (client-go's RunOrDie); drain runs
 # on SIGTERM before the lease is handed back.
-def Leader.elect(+cfg: K.Config, +o: LOpts, drain: IO(Unit), work: IO(Unit)) -> IO(Unit):
+def Leader.elect(+cfg: K.Config, +o: LOpts, drain: IO(Bool), work: IO(Unit)) -> IO(Unit):
   IO.bind(Unit, Unit, IO.spawn(Unit, Leader.on_signal(cfg, o, drain)),
     u => Leader.run(4294967295n, 4294967295n, LTry{}, cfg, o, E.Obs.none(), False{}, 0, Some{work}))

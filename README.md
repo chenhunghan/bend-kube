@@ -144,7 +144,8 @@ transforms kube-rs and controller-runtime users apply by hand.
   `X.PGeneration{}` (the spec), `X.PLabels{}`, `X.PAnnotations{}` or
   `X.PFinalizers{}`. So with `[X.PGeneration{}]`, a controller's own status
   writes don't wake it.
-  - An object the cache hasn't seen always passes.
+  - An object the cache hasn't seen always passes, and so does one
+    recreated under the same name (a new uid).
   - A deletion that starts always passes, and so does a change of
     finalizers. A controller that adds its finalizer and waits is therefore
     woken by the change.
@@ -155,13 +156,14 @@ transforms kube-rs and controller-runtime users apply by hand.
 - `X.Spec.label` and `X.Spec.field` set the primary's selectors.
   `X.Spec.max` sets how many reconciles run at once (default 8, at least 1).
 - `X.Spec.timeout(s, ms)` treats a reconcile still running after ms as
-  failed: it is retried with backoff and its key and slot are freed. The
-  late run is not cancelled, so it must stay idempotent.
+  hung. The process logs it and exits with status 1, so the pod restarts as
+  after a crash. A Bend computation can't be cancelled, and freeing the key
+  while the late run continued would let the same key run twice.
   - The default is no limit. Each limit holds a sleeper until it expires,
     even after the reconcile finishes, so a five-minute timeout at 100
     reconciles a second holds 30,000 sleepers.
-  - Without a limit, a hung reconcile holds its slot. `bendkube_reconcile_running`
-    stuck at the maximum shows it.
+  - Without a limit, a hung reconcile holds its slot.
+    `bendkube_reconcile_running` stuck at the maximum shows it.
 - **Reconcile context:** `ctx` gives:
   - the client config (`X.Ctx.cfg`) and the controller's index
     (`X.Ctx.idx`);
@@ -173,10 +175,15 @@ transforms kube-rs and controller-runtime users apply by hand.
     returns the objects the owner controls (`controller: true`, by uid).
 
   Reads from the cache aren't requests to the API server.
-- No reconcile starts until every cache has listed. `/readyz` waits for all
-  of them.
+- No reconcile starts until every cache has listed, nor while any watch is
+  midway through a relist. A key queued from an early page is reconciled
+  against the new list once it is swapped in, never dropped against the
+  old one. `/readyz` waits for every cache's first list.
 - **Errors:** a reconcile answers `Retry{msg}` to back off, or
-  `RetryIn{msg, ms}` when it chooses the delay itself. Both are logged as
+  `RetryIn{msg, ms}` when it chooses the delay itself. After a failed call,
+  `Cl.KErr.action(e)` picks for it. It answers `RetryIn` with the delay the
+  server named (a 429's `details.retryAfterSeconds`, kept as
+  `Cl.KErr.retry_after`), and `Retry` otherwise. Both are logged as
   warnings with the key and count as errors. `Hold{ms}` means "not done
   yet, look again after ms" and isn't an error. `Cl.KErr` has
   `is_conflict`, `is_not_found`, `is_already_exists` and `is_throttled`.
@@ -213,8 +220,9 @@ transforms kube-rs and controller-runtime users apply by hand.
 - Errors back off per key, from 5ms doubling to at most 1000s.
 - A delayed requeue is staled by any newer add.
 - A key has at most one pending wake, the earliest asked for by the
-  monotonic clock, with one sleeper (kube-runtime's scheduler). Requeues
-  never pile up timers. Delays of a second or more get up to 10% jitter, so
+  monotonic clock (kube-runtime's scheduler). A later or equal request
+  starts no sleeper; only an earlier one starts another, and the outdone
+  sleeper wakes to nothing. So requeues never pile up timers. Delays of a second or more get up to 10% jitter, so
   requeues armed together spread out.
 - When a key leaves the queue and its object is gone, its bookkeeping is
   forgotten. That covers objects deleted while their key ran or waited, and
@@ -246,7 +254,11 @@ deadline):
   record change. Remote timestamps are never compared.
 - Each Lease read and write is bounded by what is left of the renew
   deadline. Lateness is judged by the clock after the calls return, so a
-  hung write cannot keep a stale leader running.
+  hung write cannot keep a stale leader running. A renewal that lands only
+  after the deadline also counts as lost, as in client-go.
+- A Lease is observed when its read returns, and another holder's Lease
+  lasts its own `leaseDurationSeconds`, so a slow read or a contender
+  configured with a shorter duration can't expire a live leader.
 - Lease calls bypass the client rate limit, so a burst of reconciles
   cannot delay a renewal.
 - Lease writes go through `resourceVersion`, so of two contenders only one
@@ -271,6 +283,9 @@ controller stops starting reconciles. The process waits for the running
 ones, up to `Opts.with_grace`, then exits with status 0.
 - The default grace is 20s; with up to 4s to release the Lease, that fits
   Kubernetes' default 30s termination grace period.
+- The Lease is released only after a clean drain. If a reconcile is still
+  running at the deadline, the process exits holding the Lease, and the
+  standby takes over when it expires, never alongside the old reconcile.
 - A replica whose controllers never started (a standby) exits at once.
 - A second signal exits at once, with status 1.
 
@@ -298,8 +313,9 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   ended, without `Connection: close`.
 - A stale pooled connection is retried once on a fresh one, by Go's
   transport rule: retry when the request was not written, or when no
-  response byte came and the method is idempotent. A law states this
-  rule.
+  response byte came and the method is GET, HEAD or PUT. A law states this
+  rule. Unlike Go, a DELETE is never replayed: if the first one landed and
+  the name was recreated, a replay would delete the replacement.
 - 50 sequential GETs take 32ms pooled against 240ms with fresh
   connections.
 - Watches hold their own connection.
@@ -388,7 +404,14 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   `bendkube_store_objects` (the primary's cache),
   `bendkube_cache_objects{cache="n"}` (each related watch's cache),
   `bendkube_store_ready` and `bendkube_leader`.
-  Counters are 32-bit and wrap; Prometheus reads a wrap as a reset. The
+  Counters are 32-bit and wrap; Prometheus reads a wrap as a reset.
+- A controller's own metrics: `Metrics.add(ctx, name, labels, n)` adds to
+  a counter and `Metrics.set(ctx, name, labels, v)` sets a gauge, from
+  `src/helpers.bend`. `labels` is the inside of the braces, as
+  `bundle="b1"`. `/metrics` serves them after bend-kube's own series.
+  `examples/bundle.bend` counts its syncs this way. A series lives until
+  `Metrics.drop(ctx, name, labels)` removes it, so drop series labeled by
+  object when the object goes, or keep labels to a fixed set. The
   duration sum is kept in seconds and lasts 136 years. A duration made
   absurd by the wall clock stepping back counts as 0.
 - Events go to `events.k8s.io/v1` (`Event.publish`).
@@ -401,7 +424,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 55 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 57 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -442,11 +465,13 @@ loop.
   - a cluster-scoped owner is queued by name;
   - an owner of the same kind in another group queues nothing;
   - under any predicate, a change of finalizers reconciles.
+  - an object recreated under the same name (a new uid) reconciles.
 - **Leader election:**
   - another holder's Lease seen changing within its duration is live;
   - our clock stepping back doesn't expire it;
   - unchanged past its duration, it can be taken;
   - our own Lease is renewed, and a released one is free.
+  - another holder's Lease lasts its own recorded duration.
 - **Finalizer cleanup:** a failed or held cleanup keeps the finalizer, and
   a finished one releases it.
 - **Conditions:** setting a condition with an unchanged status keeps its

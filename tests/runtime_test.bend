@@ -96,6 +96,8 @@ def action(a: Q.Action) -> String:
   match a:
     case Q.Retry{m}:
       "Retry " ++ m
+    case Q.RetryIn{m, ms}:
+      "RetryIn " ++ U32.show(ms) ++ "ms: " ++ m
     case Q.Requeue{ms}:
       "Requeue " ++ U32.show(ms)
     case _:
@@ -112,6 +114,22 @@ def tokens.go(n: Nat, +qps: U32, +every: U32, +burst: U32, +carry: U32, +acc: U3
 
 def tokens(+qps: U32, +burst: U32) -> String:
   U32.show(tokens.go(U32.to_nat((1000 / Cl.Limit.every(qps) : U32)), qps, Cl.Limit.every(qps), burst, 0, 0))
+
+# The action a failed call suggests, from a reply's status and body.
+def failed.of(r: Result<&2, &2, Cl.KErr, J.Json>) -> String:
+  match r:
+    case Fail{+e}:
+      action(Cl.KErr.action(e))
+    case Done{x}:
+      "no error"
+
+def failed(+code: U32, body: String) -> String:
+  failed.of(Cl.Client.json.of(Done{Cl.Reply{code, body}}))
+
+def waits(st: R.CState, +key: String) -> Bool:
+  match st:
+    case R.CState{s, cs, q, x, p, t}:
+      Q.Queue.waiting(q, key)
 
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
@@ -130,7 +148,15 @@ def main() -> IO(Unit):
   # runs; the 33000 one fires and the key runs.
   +stale = st(R.Ctl.on_wake(s3, "ns/live", 61000))
   +fired = st(R.Ctl.on_wake(s3, "ns/live", 33000))
+  # A relist in two pages after an outage: a new object on the first page
+  # must not run (and be dropped) before the second page swaps the cache in.
+  +page1 = planned(msg(listed, R.MOuts{0, [W.OInit{}, W.OInitApply{cm("new")}]}, 6000, 1))
+  +page2 = planned(msg(dispatched(R.Ctl.dispatch(page1)),
+    R.MOuts{0, [W.OInitApply{cm("live")}, W.OInitDone{}]}, 7000, 1))
   do IO<Unit>:
+    IO.print("relist page 1 of 2 (new object): runs " ++ jobs(R.Ctl.dispatch(page1)))
+    IO.print("relist page 2 of 2 (swap): runs " ++ jobs(R.Ctl.dispatch(page2))
+      ++ "; ns/new waits its turn (one slot): " ++ Bool.show(waits(dispatched(R.Ctl.dispatch(page2)), "ns/new")))
     IO.print("dispatch with gone keys ahead of a live one: " ++ jobs(R.Ctl.dispatch(gone)))
     IO.print("requeue 60s at t=1000: sleeper " ++ sleeps(msg(run0, R.MDone{"ns/live", Q.Requeue{60000}, 5}, 1000, 1)))
     IO.print("requeue 30s at t=3000: sleeper " ++ sleeps(msg(run1, R.MDone{"ns/live", Q.Requeue{30000}, 5}, 3000, 1)))
@@ -141,6 +167,12 @@ def main() -> IO(Unit):
     IO.print("watch cut mid-stream: " ++ end(H.Resp{H.PErr{"connection closed mid-response"}, None{}, Nil{}}))
     IO.print("watch closed before answering: " ++ end(H.Resp{H.PLost{"closed"}, None{}, Nil{}}))
     IO.print("reconcile finished in time: " ++ action(R.Ctl.timed_out(5000, Some{Q.Requeue{60000}})))
+    IO.print("own metrics:\n" ++ R.Meter.render(
+      Map.set(&2, U32, Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "syncs_total{b=\"a\"}", 3),
+        "syncs_total{b=\"c\"}", 1), "keys", 2),
+      Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "syncs_total", 0), "keys", 1)))
+    IO.print("a 429 naming its delay: " ++ failed(429, "{\"kind\": \"Status\", \"code\": 429, \"reason\": \"TooManyRequests\", \"message\": \"slow down\", \"details\": {\"retryAfterSeconds\": 7}}"))
+    IO.print("a 500 without one: " ++ failed(500, "{\"kind\": \"Status\", \"code\": 500, \"reason\": \"InternalError\", \"message\": \"boom\"}"))
     IO.print("reconcile timed out: " ++ action(R.Ctl.timed_out(5000, None{})))
     IO.print("tokens in the first second (a fraction carries over) at qps 1, 3, 7, 50, 75, 333, 1000: " ++ tokens(1, 100) ++ " "
       ++ tokens(3, 100) ++ " " ++ tokens(7, 100) ++ " " ++ tokens(50, 100) ++ " " ++ tokens(75, 100)

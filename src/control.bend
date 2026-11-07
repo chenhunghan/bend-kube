@@ -75,13 +75,14 @@ def Pred.deleting(d: Bool) -> String:
     case False{}:
       "live"
 
-# What the predicates see of an object, its deletion and finalizers
-# included: a finalizer added or removed (by this controller or another)
+# What the predicates see of an object, its uid, deletion and finalizers
+# included: an object deleted and recreated under the same name (a new uid)
+# always passes, whatever its generation; a finalizer added or removed (by this controller or another)
 # always passes, so a controller that adds its finalizer and waits for
 # the change is woken by it.
 def Pred.print(ps: List<&2, Pred>, +o: J.Json) -> String:
-  Pred.print.go(ps, o) ++ Pred.deleting(C.Obj.is_deleting(o)) ++ "\n"
-    ++ J.Json.show(C.Obj.meta(o, "finalizers"))
+  "uid:" ++ C.Obj.uid(o) ++ "\n" ++ Pred.print.go(ps, o) ++ Pred.deleting(C.Obj.is_deleting(o))
+    ++ "\n" ++ J.Json.show(C.Obj.meta(o, "finalizers"))
 
 def Pred.changed(+ps: List<&2, Pred>, old: Maybe<&2, J.Json>, +new: J.Json) -> Bool:
   match old:
@@ -380,9 +381,10 @@ def Spec.max(s: Spec, n: U32) -> Spec:
     case Spec{p, l, fs, ps, ss, x, to}:
       Spec{p, l, fs, ps, ss, U32.max(n, 1), to}
 
-# A reconcile still running after ms is treated as failed (retried with
-# backoff) and its key freed; the late run is not cancelled, so it must
-# stay idempotent.
+# A reconcile still running after ms is hung: the process logs it and
+# exits (status 1), so the pod restarts, as a crash would. A reconcile in
+# Bend cannot be cancelled, and freeing its key while it still runs would
+# let the same key run twice.
 def Spec.timeout(s: Spec, ms: U32) -> Spec:
   match s:
     case Spec{p, l, fs, ps, ss, m, x}:
@@ -501,6 +503,18 @@ def Out.trim_all(+fs: List<&2, String>, os: List<&2, W.Out>) -> List<&2, W.Out>:
     case Con{o, t}:
       Out.trim(fs, o) <> Out.trim_all(fs, t)
 
+# Metrics a controller defines
+# ----------------------------
+
+# What a reconcile tells the meter: add n to a counter, set a gauge, or (the
+# health server) ask for every series in the Prometheus text format.
+# labels is the inside of the braces, as `kind="x",phase="y"` ("" for none).
+type Meter is Data:
+  MAdd{name: String, labels: String, n: U32}
+  MSet{name: String, labels: String, v: U32}
+  MDrop{name: String, labels: String}
+  MRead{reply: Chan(String)}
+
 # The reconcile context
 # ---------------------
 
@@ -508,33 +522,40 @@ def Out.trim_all(+fs: List<&2, String>, os: List<&2, W.Out>) -> List<&2, W.Out>:
 # controller); store: the primary's cache; caches: each related watch's,
 # in the order they were added (Ctx.cache(c, 1) is the first); fails: how
 # many times in a row this key's reconcile has failed (0 after a success),
-# so a reconcile can escalate or give up.
+# so a reconcile can escalate or give up; meter: where the controller's own
+# metrics go (Metrics.add, Metrics.set), None outside Kube.control.
 type Ctx is Data:
-  Ctx{cfg: K.Config, idx: U32, store: S.Store, caches: List<&2, S.Store>, fails: U32}
+  Ctx{cfg: K.Config, idx: U32, store: S.Store, caches: List<&2, S.Store>, fails: U32,
+    meter: Maybe<&2, Chan(Meter)>}
 
 def Ctx.cfg(c: Ctx) -> K.Config:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       cfg
 
 def Ctx.idx(c: Ctx) -> U32:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       i
 
 def Ctx.store(c: Ctx) -> S.Store:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       s
 
 def Ctx.with_fails(c: Ctx, n: U32) -> Ctx:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
-      Ctx{cfg, i, s, cs, n}
+    case Ctx{cfg, i, s, cs, fl, mt}:
+      Ctx{cfg, i, s, cs, n, mt}
+
+def Ctx.meter(c: Ctx) -> Maybe<&2, Chan(Meter)>:
+  match c:
+    case Ctx{cfg, i, s, cs, fl, mt}:
+      mt
 
 def Ctx.fails(c: Ctx) -> U32:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       fl
 
 # The cached primary under a key ("ns/name", or "name").
@@ -557,7 +578,7 @@ def Ctx.nth(cs: List<&2, S.Store>, n: Nat) -> S.Store:
 # The cache of the n-th related watch (from 1); empty if there is none.
 def Ctx.cache(c: Ctx, n: U32) -> S.Store:
   match c:
-    case Ctx{cfg, i, s, cs, fl}:
+    case Ctx{cfg, i, s, cs, fl, mt}:
       Ctx.nth(cs, U32.to_nat((n - 1 : U32)))
 
 # A cached related object under a key.

@@ -177,3 +177,29 @@ def Event.publish(+cfg: K.Config, +o: J.Json, +r: C.Res, warn: Bool, reason: Str
     w => IO.bind(Result<&1, &1, U32 & String, String>, Unit, IO.get_env("HOSTNAME"),
       h => Event.post(cfg, o, r, warn, reason, action, note, controller,
         Event.stamp(T.Wall.of(w), Event.inst(h, controller)))))
+
+# Metrics
+# -------
+
+def Metrics.send(m: Maybe<&2, Chan(X.Meter)>, x: X.Meter) -> IO(Unit):
+  match m:
+    case Some{ch}:
+      IO.bind(Result<&1, &1, X.Meter, Unit>, Unit, Chan.send(X.Meter, ch, x), u => IO.pure(Unit, Unit{}))
+    case None{}:
+      IO.pure(Unit, Unit{})
+
+# Adds n to the controller's counter name (labels: the inside of the
+# braces, as `kind="x"`, "" for none); /metrics serves it beside
+# bend-kube's own.
+def Metrics.add(c: X.Ctx, name: String, labels: String, n: U32) -> IO(Unit):
+  Metrics.send(X.Ctx.meter(c), X.MAdd{name, labels, n})
+
+# Drops one series (by name and labels), as when the object its labels name
+# is deleted: series labeled by object live until dropped, so drop them to
+# keep /metrics bounded by the live objects.
+def Metrics.drop(c: X.Ctx, name: String, labels: String) -> IO(Unit):
+  Metrics.send(X.Ctx.meter(c), X.MDrop{name, labels})
+
+# Sets the controller's gauge name.
+def Metrics.set(c: X.Ctx, name: String, labels: String, v: U32) -> IO(Unit):
+  Metrics.send(X.Ctx.meter(c), X.MSet{name, labels, v})

@@ -481,6 +481,28 @@ law lease_released_is_free:
   for now: U32
   {E.Lease.held(Ex.lease(""), "b", E.Obs{"", "r", at}, now, 15) == False{} : Bool}
 
+# A held Lease lasts its holder's own duration (spec.leaseDurationSeconds),
+# however short the contender's: 20s after its last change, a 30s lease is
+# still live for a contender configured with 15s.
+law lease_holder_duration_rules:
+  {E.Lease.held(J.Json.obj([J.KV{"spec", J.Json.obj([J.KV{"holderIdentity", J.JStr{"a"}},
+    J.KV{"renewTime", J.JStr{"r"}}, J.KV{"leaseDurationSeconds", J.JNum{"30"}}])}]),
+    "b", E.Obs{"a", "r", 100000}, 120000, 15) == True{} : Bool}
+
+# An object deleted and recreated under the same name (a new uid) passes the
+# generation predicate even at the same generation.
+law filter_new_uid_passes:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  {X.Pred.passes([X.PGeneration{}],
+    Some{J.Json.set(Ex.obj(J.JNum{"1"}, r1, J.JNull{}, a), "metadata",
+      J.Json.set(J.Json.get(Ex.obj(J.JNum{"1"}, r1, J.JNull{}, a), "metadata"), "uid", J.JStr{"u1"}))},
+    J.Json.set(Ex.obj(J.JNum{"1"}, r2, J.JNull{}, b), "metadata",
+      J.Json.set(J.Json.get(Ex.obj(J.JNum{"1"}, r2, J.JNull{}, b), "metadata"), "uid", J.JStr{"u2"})))
+    == True{} : Bool}
+
 # Conditions (apimachinery's meta.SetStatusCondition)
 # ---------------------------------------------------
 

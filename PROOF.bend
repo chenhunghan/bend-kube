@@ -206,3 +206,9 @@ def Laws.fin_held_cleanup_keeps(ms):
 
 def Laws.fin_done_cleanup_releases():
   {==}
+
+def Laws.lease_holder_duration_rules():
+  {==}
+
+def Laws.filter_new_uid_passes(r1, r2, a, b):
+  {==}

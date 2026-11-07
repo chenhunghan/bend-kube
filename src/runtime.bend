@@ -363,19 +363,22 @@ def Drv.run(outer: Nat, fuel: Nat, ev: DEv, +st: W.WState, +resp: H.Resp, +carry
 # The controller's clock: each key's pending wake (its deadline in wall
 # ms, and the queue generation it carries), the time of the message being
 # handled, when a status snapshot was last published (and its readiness),
-# whether anything happened since, and whether a publish tick is pending.
+# whether anything happened since, whether a publish tick is pending, and
+# which watches (by source number) are midway through a relist.
 type Tim is Data:
-  Tim{at: Map<&2, U32>, gen: Map<&2, U32>, now: U32, snap: U32, ready: Bool, dirty: Bool, tick: Bool}
+  Tim{at: Map<&2, U32>, gen: Map<&2, U32>, now: U32, snap: U32, ready: Bool, dirty: Bool, tick: Bool,
+    relist: Map<&2, U32>}
 
 def Tim.new() -> Tim:
-  Tim{Map.new(&2, U32), Map.new(&2, U32), 0, 0, False{}, False{}, False{}}
+  Tim{Map.new(&2, U32), Map.new(&2, U32), 0, 0, False{}, False{}, False{}, Map.new(&2, U32)}
 
 type CState is Data:
   CState{store: S.Store, caches: List<&2, S.Store>, queue: Q.Queue, stats: Stats,
     stop: Maybe<&2, Chan(Unit)>, tim: Tim}
 
 type CCtx is Data:
-  CCtx{cfg: K.Config, spec: X.Spec, chan: Chan(Msg), status: Chan(SMsg), idx: U32}
+  CCtx{cfg: K.Config, spec: X.Spec, chan: Chan(Msg), status: Chan(SMsg), idx: U32,
+    meter: Chan(X.Meter)}
 
 # A reconcile to start: the key and the object the store holds for it.
 type Job is Data:
@@ -504,7 +507,40 @@ def Ctl.rel.put(+n: Nat, s: S.Store, cs: List<&2, S.Store>, q: Q.Queue, x: Stats
 
 # Outputs of watch src: the primary's (0) through its predicates, a related
 # watch's (n) through its relation.
-def Ctl.on_outs(st: CState, +src: U32, +outs: List<&2, W.Out>, +spec: X.Spec, own: Bool) -> CState:
+# Whether a watch is midway through a relist after a batch of its outputs:
+# Init opens one, InitDone closes it.
+def Relist.after(os: List<&2, W.Out>, open: Bool) -> Bool:
+  match os:
+    case Nil{}:
+      open
+    case Con{W.OInit{}, t}:
+      Relist.after(t, True{})
+    case Con{W.OInitDone{}, t}:
+      Relist.after(t, False{})
+    case Con{o, t}:
+      Relist.after(t, open)
+
+def Relist.mark(st: CState, +src: U32, open: Bool) -> CState:
+  match st open:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}} True{}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, Q.Mp.on(rl, U32.show(src))}}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}} False{}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, Q.Mp.off(rl, U32.show(src))}}
+
+def Relist.open(st: CState, +src: U32) -> Bool:
+  match st:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}}:
+      Q.Mp.has(rl, U32.show(src))
+
+# Whether any watch is midway through a relist: its cache still holds the
+# old list, so no reconcile may start (a key from an early page would be
+# looked up in the old cache and dropped).
+def Relist.any(st: CState) -> Bool:
+  match st:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
+      Bool.not(List.is_empty(&2, String, Map.keys(&2, U32, rl)))
+
+def Ctl.on_outs.fold(st: CState, +src: U32, +outs: List<&2, W.Out>, +spec: X.Spec, own: Bool) -> CState:
   match st own:
     case CState{s, cs, q, x, p, tm} True{}:
       Ctl.prim.put(cs, q, Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs))), p, tm,
@@ -515,6 +551,10 @@ def Ctl.on_outs(st: CState, +src: U32, +outs: List<&2, W.Out>, +spec: X.Spec, ow
         X.Fold.rel(Secs.rel(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))), X.Spec.res(spec),
           X.Out.trim_all(Secs.drop(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))), outs), s,
           X.Fold{Caches.nth(cs, U32.to_nat((src - 1 : U32))), Nil{}, Nil{}}))
+
+# Outputs of watch src, folded (Ctl.on_outs.fold), with its relist state.
+def Ctl.on_outs(+st: CState, +src: U32, +outs: List<&2, W.Out>, +spec: X.Spec, own: Bool) -> CState:
+  Relist.mark(Ctl.on_outs.fold(st, src, outs, spec, own), src, Relist.after(outs, Relist.open(st, src)))
 
 def Ctl.on_done(s: S.Store, cs: List<&2, S.Store>, x: Stats, p: Maybe<&2, Chan(Unit)>, tm: Tim,
   r: Q.Queue & List<&2, Q.Timer>) -> CState & List<&2, Q.Timer>:
@@ -548,15 +588,15 @@ def Ctl.on_done.st(st: CState, +key: String, +a: Q.Action, +ms: U32) ->
 
 def Ctl.on_wake.go(st: CState, +key: String, mine: Bool) -> CState & List<&2, Q.Timer>:
   match st mine:
-    case CState{s, cs, q, x, p, Tim{+at, +gen, n, sn, rd, dt, tk}} True{}:
+    case CState{s, cs, q, x, p, Tim{+at, +gen, n, sn, rd, dt, tk, rl}} True{}:
       (CState{s, cs, Q.Queue.wake(q, key, Q.Mp.get(gen, key)), x, p,
-        Tim{Q.Mp.off(at, key), Q.Mp.off(gen, key), n, sn, rd, dt, tk}}, Nil{})
+        Tim{Q.Mp.off(at, key), Q.Mp.off(gen, key), n, sn, rd, dt, tk, rl}}, Nil{})
     case y False{}:
       (y, Nil{})
 
 def Tim.at(st: CState) -> Map<&2, U32>:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
       at
 
 # A sleeper woke: if it is still the one for its key's pending wake (the
@@ -577,8 +617,8 @@ type Disp is Data:
 
 def Ctl.ticked(st: CState) -> CState:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk}}:
-      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, False{}}}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, False{}, rl}}
 
 # Scheduling
 # ----------
@@ -615,16 +655,16 @@ def Tim.sooner(+at: U32, +now: U32, +ms: U32) -> Bool:
 def Tim.arm.go(t: Tim, +key: String, +g: U32, +ms: U32, pending: Bool, sooner: Bool,
   ss: List<&2, Sleep>) -> Tim & List<&2, Sleep>:
   match t pending sooner:
-    case Tim{at, gen, +n, sn, rd, dt, tk} True{} True{}:
-      (Tim{at, Map.set(&2, U32, gen, key, g), n, sn, rd, dt, tk}, ss)
-    case Tim{at, gen, +n, sn, rd, dt, tk} _ _:
-      (Tim{Map.set(&2, U32, at, key, (n + ms : U32)), Map.set(&2, U32, gen, key, g), n, sn, rd, dt, tk},
+    case Tim{at, gen, +n, sn, rd, dt, tk, rl} True{} True{}:
+      (Tim{at, Map.set(&2, U32, gen, key, g), n, sn, rd, dt, tk, rl}, ss)
+    case Tim{at, gen, +n, sn, rd, dt, tk, rl} _ _:
+      (Tim{Map.set(&2, U32, at, key, (n + ms : U32)), Map.set(&2, U32, gen, key, g), n, sn, rd, dt, tk, rl},
         Sleep{key, (n + ms : U32), ms} <> ss)
 
 def Tim.arm(t: Tim, tm: Q.Timer, ss: List<&2, Sleep>) -> Tim & List<&2, Sleep>:
   match t tm:
-    case Tim{+at, gen, +n, sn, rd, dt, tk} Q.Timer{+key, g, +ms}:
-      Tim.arm.go(Tim{at, gen, n, sn, rd, dt, tk}, key, g, ms, Q.Mp.has(at, key),
+    case Tim{+at, gen, +n, sn, rd, dt, tk, rl} Q.Timer{+key, g, +ms}:
+      Tim.arm.go(Tim{at, gen, n, sn, rd, dt, tk, rl}, key, g, ms, Q.Mp.has(at, key),
         Tim.sooner(Q.Mp.get(at, key), n, ms), ss)
 
 def Tim.arm.pair(r: Tim & List<&2, Sleep>, t: Q.Timer) -> Tim & List<&2, Sleep>:
@@ -654,8 +694,8 @@ def Ctl.plan(r: CState & List<&2, Q.Timer>) -> CState & List<&2, Sleep>:
 # The state at a message's arrival: the clock reads now.
 def Ctl.at(st: CState, +now: U32) -> CState:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk}}:
-      CState{s, cs, q, x, p, Tim{at, gen, now, sn, rd, True{}, tk}}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
+      CState{s, cs, q, x, p, Tim{at, gen, now, sn, rd, True{}, tk, rl}}
 
 def Ctl.dispatch.forget(r: Q.Queue & List<&2, Q.Timer>, +key: String) -> Q.Queue:
   match r:
@@ -717,12 +757,13 @@ def Ctl.stopping(p: Maybe<&2, Chan(Unit)>) -> Bool:
       False{}
 
 # The reconciles to start now: none until every cache has its first list,
-# and none once stopping.
+# none while a watch is midway through a relist, and none once stopping.
 def Ctl.dispatch(st: CState) -> CState & List<&2, Job>:
   match st:
-    case CState{+s, +cs, q, x, +p, tm}:
+    case CState{+s, +cs, +q, +x, +p, +tm}:
       Ctl.dispatch.ready(s, cs, q, x, p, tm,
-        Bool.and(Bool.and(S.Store.ready(s), Caches.ready(cs)), Bool.not(Ctl.stopping(p))))
+        Bool.and(Bool.and(Bool.and(S.Store.ready(s), Caches.ready(cs)), Bool.not(Ctl.stopping(p))),
+          Bool.not(Relist.any(CState{s, cs, q, x, p, tm}))))
 
 def Ctl.halt.go(p: Maybe<&2, Chan(Unit)>, idle: Bool) -> Maybe<&2, Chan(Unit)>:
   match idle:
@@ -744,18 +785,18 @@ def Ctl.ready(st: CState) -> Bool:
 
 def Ctl.snap_due(st: CState) -> Bool:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, +n, +sn, +rd, dt, tk}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, +n, +sn, +rd, dt, tk, rl}}:
       Bool.or(Bool.or(U32.is_ge((n - sn : U32), 1000), U32.is_eq(sn, 0)),
-        Bool.xor(rd, Ctl.ready(CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk}})))
+        Bool.xor(rd, Ctl.ready(CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}})))
 
 def Ctl.ticking(st: CState) -> CState:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk}}:
-      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, True{}}}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, True{}, rl}}
 
 def Ctl.tick_pending(st: CState) -> Bool:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
       tk
 
 # What an idle loop does about its status: publish now (a second has
@@ -777,7 +818,7 @@ def Ctl.idle.go(dirty: Bool, due: Bool, pending: Bool) -> Idle:
 
 def Ctl.dirty(st: CState) -> Bool:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
       dt
 
 def Ctl.idle(+st: CState) -> Idle:
@@ -785,8 +826,8 @@ def Ctl.idle(+st: CState) -> Idle:
 
 def Ctl.snapped(st: CState) -> CState:
   match st:
-    case CState{+s, +cs, q, x, p, Tim{at, gen, +n, sn, rd, dt, tk}}:
-      CState{s, cs, q, x, p, Tim{at, gen, n, U32.max(n, 1), Bool.and(S.Store.ready(s), Caches.ready(cs)), False{}, tk}}
+    case CState{+s, +cs, q, x, p, Tim{at, gen, +n, sn, rd, dt, tk, rl}}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, U32.max(n, 1), Bool.and(S.Store.ready(s), Caches.ready(cs)), False{}, tk, rl}}
 
 def Ctl.snap(st: CState, name: String) -> Snap:
   match st:
@@ -796,18 +837,23 @@ def Ctl.snap(st: CState, name: String) -> Snap:
 
 def CCtx.status(c: CCtx) -> Chan(SMsg):
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       st
 
 def CCtx.idx(c: CCtx) -> U32:
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       ix
 
 def CCtx.spec(c: CCtx) -> X.Spec:
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       sp
+
+def CCtx.meter(c: CCtx) -> Chan(X.Meter):
+  match c:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
+      mt
 
 def CCtx.kind(c: CCtx) -> String:
   X.Spec.kind(CCtx.spec(c))
@@ -829,7 +875,7 @@ def Ctl.publish(+st: CState, +ctx: CCtx, due: Bool) -> IO(CState):
 
 def CCtx.chan(c: CCtx) -> Chan(Msg):
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       ch
 
 # At idle: publish, or arm the tick, then wait for the next message.
@@ -877,14 +923,14 @@ def Ctl.sleeps(ss: List<&2, Sleep>, +chan: Chan(Msg)) -> IO(Unit):
 
 def CCtx.cfg(c: CCtx) -> K.Config:
   match c:
-    case CCtx{cfg, sp, ch, st, ix}:
+    case CCtx{cfg, sp, ch, st, ix, mt}:
       cfg
 
 # What a reconcile sees: the config, the controller's index and the caches.
 def Ctl.ctx(st: CState, +c: CCtx) -> X.Ctx:
   match st:
     case CState{s, cs, q, x, p, tm}:
-      X.Ctx{CCtx.cfg(c), CCtx.idx(c), s, cs, 0}
+      X.Ctx{CCtx.cfg(c), CCtx.idx(c), s, cs, 0, Some{CCtx.meter(c)}}
 
 def Ctl.report(+key: String, +kind: String, a: Q.Action) -> IO(Unit):
   match a:
@@ -916,19 +962,29 @@ def Ctl.timed_out(+to: U32, m: Maybe<&1, Q.Action>) -> Q.Action:
     case None{}:
       Q.Retry{"reconcile timed out after " ++ U32.show(to) ++ "ms"}
 
+def Ctl.hung(+key: String, +to: U32, m: Maybe<&1, Q.Action>) -> IO(Q.Action):
+  match m:
+    case Some{a}:
+      IO.pure(Q.Action, a)
+    case None{}:
+      IO.bind(Unit, Q.Action, L.Log.error("reconcile hung past its timeout; exiting so the pod restarts",
+        [L.Log.kv("key", key), L.Log.kv("timeout_ms", U32.show(to))]), u => IO.die(Q.Action, 1, "reconcile hung"))
+
 # The reconcile itself, raced against its timeout when it has one.
-def Ctl.call(~rec: J.Json -> X.Ctx -> IO(Q.Action), o: J.Json, +ctx: X.Ctx, +to: U32, unbounded: Bool) ->
-  IO(Q.Action):
+# A reconcile that outlives its timeout exits the process: it cannot be
+# cancelled, and freeing its key while it runs would run the key twice.
+def Ctl.call(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx, +to: U32,
+  unbounded: Bool) -> IO(Q.Action):
   match unbounded:
     case True{}:
       rec(o, ctx)
     case False{}:
       IO.bind(Maybe<&1, Q.Action>, Q.Action, IO.within(Q.Action, to, rec(o, ctx)),
-        m => IO.pure(Q.Action, Ctl.timed_out(to, m)))
+        m => Ctl.hung(key, to, m))
 
 def Ctl.job.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx,
   +kind: String, +chan: Chan(Msg), +to: U32, +t0: U32) -> IO(Result<&1, &1, Msg, Unit>):
-  IO.bind(Q.Action, Result<&1, &1, Msg, Unit>, Ctl.call(~rec, o, ctx, to, U32.is_eq(to, 0)),
+  IO.bind(Q.Action, Result<&1, &1, Msg, Unit>, Ctl.call(~rec, key, o, ctx, to, U32.is_eq(to, 0)),
     a => Ctl.job.end(key, a, t0, kind, chan))
 
 # A reconcile, timed; a failure is logged; MDone answers on the channel.
@@ -1041,17 +1097,99 @@ def Keeper.start() -> IO(Chan(SMsg)):
         x => Keeper.run(4294967295n, 4294967295n, x, Map.new(&2, Snap), c))), u => IO.pure(Chan(SMsg), c)))
 
 def Ctl.loop(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +spec: X.Spec,
-  +chan: Chan(Msg), +status: Chan(SMsg), +idx: U32) -> IO(Unit):
+  +chan: Chan(Msg), +status: Chan(SMsg), +meter: Chan(X.Meter), +idx: U32) -> IO(Unit):
   Ctl.run(~rec, 4294967295n, 4294967295n,
     CDisp{(CState{S.Store.new(),
       List.replicate(S.Store, List.length(&2, X.Sec, X.Spec.secs(spec)), S.Store.new()),
       Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}}, None{}, Tim.new()}, Nil{})},
     CState{S.Store.new(), Nil{}, Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}},
       None{}, Tim.new()},
-    CCtx{cfg, spec, chan, status, idx})
+    CCtx{cfg, spec, chan, status, idx, meter})
 
 def Controller.inbox() -> IO(Chan(Msg)):
   Chan.new(Msg, 4096)
+
+# Meter
+# -----
+#
+# The metrics controllers define (X.Meter): counters and gauges by name and
+# labels, held by one computation and rendered for /metrics.
+
+def Meter.key(+name: String, +labels: String, none: Bool) -> String:
+  match none:
+    case True{}:
+      name
+    case False{}:
+      name ++ "{" ++ labels ++ "}"
+
+def Meter.kind(k: U32) -> String:
+  match k:
+    case 0:
+      "counter"
+    case _:
+      "gauge"
+
+def Meter.sample(+k: String, mine: Bool, +vals: Map<&2, U32>) -> String:
+  match mine:
+    case True{}:
+      k ++ " " ++ U32.show(Q.Mp.get(vals, k)) ++ "\n"
+    case False{}:
+      ""
+
+def Meter.samples(ks: List<&2, String>, +name: String, +vals: Map<&2, U32>) -> String:
+  match ks:
+    case Nil{}:
+      ""
+    case Con{+k, t}:
+      Meter.sample(k, Bool.or(String.eq(k, name), String.starts_with(k, name ++ "{")), vals)
+        ++ Meter.samples(t, name, vals)
+
+def Meter.render.go(ns: List<&2, String>, +vals: Map<&2, U32>, +kinds: Map<&2, U32>) -> String:
+  match ns:
+    case Nil{}:
+      ""
+    case Con{+n, t}:
+      "# TYPE " ++ n ++ " " ++ Meter.kind(Q.Mp.get(kinds, n)) ++ "\n"
+        ++ Meter.samples(Map.keys(&2, U32, vals), n, vals) ++ Meter.render.go(t, vals, kinds)
+
+# Every series, family by family, in the Prometheus text format.
+def Meter.render(+vals: Map<&2, U32>, +kinds: Map<&2, U32>) -> String:
+  Meter.render.go(Map.keys(&2, U32, kinds), vals, kinds)
+
+def Meter.run(outer: Nat, fuel: Nat, m: Maybe<&1, X.Meter>, +vals: Map<&2, U32>, +kinds: Map<&2, U32>,
+  +inbox: Chan(X.Meter)) -> IO(Unit):
+  match outer fuel m:
+    case 0n 0n x:
+      Loop.spent("Meter.run")
+    case 1n+o 0n x:
+      Meter.run(o, 4294967295n, x, vals, kinds, inbox)
+    case o 1n+f None{}:
+      IO.pure(Unit, Unit{})
+    case o 1n+f Some{X.MAdd{+n, +l, +k}}:
+      IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, inbox),
+        x => Meter.run(o, f, x,
+          Map.set(&2, U32, vals, Meter.key(n, l, String.is_empty(l)),
+            (Q.Mp.get(vals, Meter.key(n, l, String.is_empty(l))) + k : U32)),
+          Map.set(&2, U32, kinds, n, 0), inbox))
+    case o 1n+f Some{X.MSet{+n, +l, v}}:
+      IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, inbox),
+        x => Meter.run(o, f, x, Map.set(&2, U32, vals, Meter.key(n, l, String.is_empty(l)), v),
+          Map.set(&2, U32, kinds, n, 1), inbox))
+    case o 1n+f Some{X.MDrop{+n, +l}}:
+      IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, inbox),
+        x => Meter.run(o, f, x, Map.del(&2, U32, vals, Meter.key(n, l, String.is_empty(l))), kinds, inbox))
+    case o 1n+f Some{X.MRead{r}}:
+      IO.bind(Result<&1, &1, String, Unit>, Unit, Chan.send(String, r, Meter.render(vals, kinds)),
+        u => IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, inbox),
+          x => Meter.run(o, f, x, vals, kinds, inbox)))
+
+# Starts the meter; answers its inbox.
+def Meter.start() -> IO(Chan(X.Meter)):
+  IO.bind(Chan(X.Meter), Chan(X.Meter), Chan.new(X.Meter, 4096),
+    +c => IO.bind(Unit, Chan(X.Meter), IO.spawn(Unit,
+      IO.bind(Maybe<&1, X.Meter>, Unit, Chan.recv(X.Meter, c),
+        x => Meter.run(4294967295n, 4294967295n, x, Map.new(&2, U32), Map.new(&2, U32), c))),
+      u => IO.pure(Chan(X.Meter), c)))
 
 # Manager
 # -------
@@ -1148,58 +1286,71 @@ def Manager.watch(+cfg: K.Config, ws: List<&2, Watch>) -> IO(Unit):
       IO.bind(Unit, Unit, Ctl.watch.subs(cfg, a, l, fs, ss), u => Manager.watch(cfg, t))
 
 def Manager.loops(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, cs: List<&2, X.Spec>,
-  chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +i: U32) -> IO(Unit):
+  chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +i: U32) -> IO(Unit):
   match cs chs:
     case Con{s, t} Con{ch, ct}:
-      IO.bind(Unit, Unit, IO.spawn(Unit, Ctl.loop(~rec, cfg, s, ch, status, i)),
-        u => Manager.loops(~rec, cfg, t, ct, status, (i + 1 : U32)))
+      IO.bind(Unit, Unit, IO.spawn(Unit, Ctl.loop(~rec, cfg, s, ch, status, meter, i)),
+        u => Manager.loops(~rec, cfg, t, ct, status, meter, (i + 1 : U32)))
     case _ _:
       IO.pure(Unit, Unit{})
 
 # Runs every controller on its inbox (Manager.inboxes), sharing their
 # watches. rec(obj, ctx) reconciles obj; X.Ctx.idx(ctx) names the
 # controller.
-def Manager.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
-  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +started: Chan(Unit)) -> IO(Unit):
-  IO.bind(Poll<&1, &1, Result<&1, &1, Unit, Unit>, Unit>, Unit, Chan.try_send(Unit, started, Unit{}, 0),
-    u0 => IO.bind(Unit, Unit, Manager.watch(cfg, Plan.build(cs, chs, Nil{})),
-      u => Manager.loops(~rec, cfg, cs, chs, status, 0)))
+def Manager.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
+  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter),
+  p: Poll<&1, &1, Maybe<&1, Unit>, Unit>) -> IO(Unit):
+  match p:
+    case Ready{Some{u}}:
+      IO.bind(Unit, Unit, Manager.watch(cfg, Plan.build(cs, chs, Nil{})),
+        u2 => Manager.loops(~rec, cfg, cs, chs, status, meter, 0))
+    case _:
+      L.Log.info("shutting down; controllers not started", Nil{})
 
-# A channel that holds a token once the controllers have started (on a
-# leader, once it leads), so shutdown knows whether there is anything to
-# drain.
-def Manager.started() -> IO(Chan(Unit)):
-  Chan.new(Unit, 1)
+# Runs every controller on its inbox (Manager.inboxes), sharing their
+# watches, once it takes the start gate's token (Manager.gate): shutdown
+# takes it first when it comes first, and then nothing starts. rec(obj,
+# ctx) reconciles obj; X.Ctx.idx(ctx) names the controller.
+def Manager.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
+  +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +gate: Chan(Unit)) ->
+  IO(Unit):
+  IO.bind(Poll<&1, &1, Maybe<&1, Unit>, Unit>, Unit, Chan.try_recv(Unit, gate, 0),
+    p => Manager.start.go(~rec, cfg, cs, chs, status, meter, p))
+
+# The start gate: one token, taken by whichever comes first, the
+# controllers starting (Manager.start) or shutdown (Manager.stop). So
+# shutdown either knows they run and drains them, or keeps them from ever
+# starting.
+def Manager.gate() -> IO(Chan(Unit)):
+  IO.bind(Chan(Unit), Chan(Unit), Chan.new(Unit, 1),
+    +c => IO.bind(Poll<&1, &1, Result<&1, &1, Unit, Unit>, Unit>, Chan(Unit),
+      Chan.try_send(Unit, c, Unit{}, 0), u => IO.pure(Chan(Unit), c)))
 
 # Stopping
 # --------
 
-def Stop.ask.sent(p: Poll<&1, &1, Result<&1, &1, Msg, Unit>, Msg>, +r: Chan(Unit)) -> Maybe<&2, Chan(Unit)>:
-  match p:
-    case Ready{Done{u}}:
-      Some{r}
-    case _:
-      None{}
+# The stop requests delivered, and whether every controller took one.
+type Asked is Data:
+  Asked{rs: List<&2, Chan(Unit)>, all: Bool}
 
-def Stop.ask.put(m: Maybe<&2, Chan(Unit)>, rest: List<&2, Chan(Unit)>) -> List<&2, Chan(Unit)>:
-  match m:
-    case Some{r}:
-      r <> rest
-    case None{}:
-      rest
+def Stop.ask.put(p: Poll<&1, &1, Result<&1, &1, Msg, Unit>, Msg>, +r: Chan(Unit), a: Asked) -> Asked:
+  match p a:
+    case Ready{Done{u}} Asked{rs, all}:
+      Asked{r <> rs, all}
+    case _ Asked{rs, all}:
+      Asked{rs, False{}}
 
-# Asks each controller to stop; a controller whose inbox does not take the
-# request within a second is not waited for.
-def Stop.ask(chs: List<&2, Chan(Msg)>) -> IO(List<&2, Chan(Unit)>):
+# Asks each controller to stop; one whose inbox does not take the request
+# within a second makes the drain unclean (its reconciles may go on).
+def Stop.ask(chs: List<&2, Chan(Msg)>) -> IO(Asked):
   match chs:
     case Nil{}:
-      IO.pure(List<&2, Chan(Unit)>, Nil{})
+      IO.pure(Asked, Asked{Nil{}, True{}})
     case Con{ch, t}:
-      IO.bind(Chan(Unit), List<&2, Chan(Unit)>, Chan.new(Unit, 1),
-        +r => IO.bind(Poll<&1, &1, Result<&1, &1, Msg, Unit>, Msg>, List<&2, Chan(Unit)>,
+      IO.bind(Chan(Unit), Asked, Chan.new(Unit, 1),
+        +r => IO.bind(Poll<&1, &1, Result<&1, &1, Msg, Unit>, Msg>, Asked,
           Chan.try_send(Msg, ch, MStop{r}, 1000),
-          p => IO.bind(List<&2, Chan(Unit)>, List<&2, Chan(Unit)>, Stop.ask(t),
-            rest => IO.pure(List<&2, Chan(Unit)>, Stop.ask.put(Stop.ask.sent(p, r), rest)))))
+          p => IO.bind(Asked, Asked, Stop.ask(t), rest => IO.pure(Asked, Stop.ask.put(p, r, rest)))))
 
 def Stop.wait(rs: List<&2, Chan(Unit)>) -> IO(Unit):
   match rs:
@@ -1208,28 +1359,43 @@ def Stop.wait(rs: List<&2, Chan(Unit)>) -> IO(Unit):
     case Con{r, t}:
       IO.bind(Maybe<&1, Unit>, Unit, Chan.recv(Unit, r), u => Stop.wait(t))
 
-def Stop.said(m: Maybe<&1, Unit>) -> IO(Unit):
+# Whether every controller took the stop request and finished in time.
+def Stop.said(m: Maybe<&1, Bool>) -> IO(Bool):
   match m:
-    case Some{u}:
-      L.Log.info("reconciles drained", Nil{})
+    case Some{True{}}:
+      IO.bind(Unit, Bool, L.Log.info("reconciles drained", Nil{}), x => IO.pure(Bool, True{}))
+    case Some{False{}}:
+      IO.bind(Unit, Bool,
+        L.Log.warn("a controller did not take the stop request; exiting without releasing the lease", Nil{}),
+        x => IO.pure(Bool, False{}))
     case None{}:
-      L.Log.warn("reconciles still running at the grace deadline; stopping anyway", Nil{})
+      IO.bind(Unit, Bool,
+        L.Log.warn("reconciles still running at the grace deadline; exiting without releasing the lease", Nil{}),
+        x => IO.pure(Bool, False{}))
 
-def Stop.all(chs: List<&2, Chan(Msg)>) -> IO(Unit):
-  IO.bind(List<&2, Chan(Unit)>, Unit, Stop.ask(chs), rs => Stop.wait(rs))
+def Stop.all.of(a: Asked) -> IO(Bool):
+  match a:
+    case Asked{rs, all}:
+      IO.bind(Unit, Bool, Stop.wait(rs), u => IO.pure(Bool, all))
 
-def Stop.drain(chs: List<&2, Chan(Msg)>, +grace: U32, p: Poll<&1, &1, Maybe<&1, Unit>, Unit>) -> IO(Unit):
+def Stop.all(chs: List<&2, Chan(Msg)>) -> IO(Bool):
+  IO.bind(Asked, Bool, Stop.ask(chs), Stop.all.of)
+
+# p: shutdown's attempt to take the start gate's token. Taking it means no
+# controller started, nor ever will: nothing to drain. Otherwise they run.
+def Stop.drain(chs: List<&2, Chan(Msg)>, +grace: U32, p: Poll<&1, &1, Maybe<&1, Unit>, Unit>) -> IO(Bool):
   match p:
     case Ready{Some{u}}:
-      IO.bind(Unit, Unit, L.Log.info("draining reconciles", [L.Log.kv("grace_ms", U32.show(grace))]),
-        u2 => IO.bind(Maybe<&1, Unit>, Unit, IO.within(Unit, grace, Stop.all(chs)), Stop.said))
+      # no controller started (a standby replica), and none will now
+      IO.pure(Bool, True{})
     case _:
-      # a standby replica runs no controller
-      IO.pure(Unit, Unit{})
+      IO.bind(Unit, Bool, L.Log.info("draining reconciles", [L.Log.kv("grace_ms", U32.show(grace))]),
+        u2 => IO.bind(Maybe<&1, Bool>, Bool, IO.within(Bool, grace, Stop.all(chs)), Stop.said))
 
 # Asks every running controller to stop: no new reconciles start, and this
 # returns once the running ones finish, or after grace ms. Nothing to do
-# when the controllers never started (a standby replica).
-def Manager.stop(chs: List<&2, Chan(Msg)>, +started: Chan(Unit), +grace: U32) -> IO(Unit):
-  IO.bind(Poll<&1, &1, Maybe<&1, Unit>, Unit>, Unit, Chan.try_recv(Unit, started, 0),
+# when the controllers never started (a standby replica). Answers whether
+# nothing is left running.
+def Manager.stop(chs: List<&2, Chan(Msg)>, +gate: Chan(Unit), +grace: U32) -> IO(Bool):
+  IO.bind(Poll<&1, &1, Maybe<&1, Unit>, Unit>, Bool, Chan.try_recv(Unit, gate, 0),
     p => Stop.drain(chs, grace, p))

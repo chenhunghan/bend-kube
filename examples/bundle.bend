@@ -7,6 +7,7 @@ import ../src/queue.bend as Q
 import ../src/control.bend as X
 import ../src/kube.bend as Kb
 import ../src/log.bend as L
+import ../src/helpers.bend as Hp
 
 # A controller that reads from its caches and follows a reference: every
 # ConfigMap labeled bend-kube/bundle=true in bend-demo names a Secret in
@@ -21,6 +22,8 @@ import ../src/log.bend as L
 #   ConfigMaps (cache 1, X.Ctx.children).
 # - The generation predicate is set; ConfigMaps have no generation, so
 #   every change still passes, as it should.
+# - It keeps its own metrics (Metrics.add, Metrics.set): syncs per bundle
+#   and the key count of each bundle's Secret.
 
 def ns() -> String:
   "bend-demo"
@@ -68,6 +71,11 @@ def run(+o: J.Json, +c: X.Ctx, +secret: String) -> IO(Q.Action):
       L.Log.kv("owned", Nat.show(List.length(&2, J.Json, X.Ctx.children(c, 1, o))))])
     r : Result<&2, &2, Cl.KErr, J.Json> <- Cl.Client.apply(X.Ctx.cfg(c), cms(), C.Obj.name(o) ++ "-keys",
       "bend-kube-bundle", output(o, secret, X.Ctx.find(c, 2, ns() ++ "/" ++ secret)))
+    # the controller's own metrics, served on /metrics beside bend-kube's
+    Hp.Metrics.add(c, "bundle_syncs_total", "bundle=\"" ++ C.Obj.name(o) ++ "\"", 1)
+    Hp.Metrics.set(c, "bundle_secret_keys", "bundle=\"" ++ C.Obj.name(o) ++ "\"",
+      U32.from_nat(List.length(&2, J.Json, keys(J.Json.get(Maybe.default(&2, J.Json,
+        X.Ctx.find(c, 2, ns() ++ "/" ++ secret), J.JNull{}), "data")))))
     done(r)
 
 def reconcile.of(+o: J.Json, c: X.Ctx) -> IO(Q.Action):

@@ -119,13 +119,16 @@ sed 's/"bend-demo"/"bend-e2e"/' examples/bundle.bend > examples/.bundle-e2e.bend
 (cd examples && bend .bundle-e2e.bend -o "$work/bundle") >/dev/null 2>&1; rm -f examples/.bundle-e2e.bend
 k create secret generic s1 --from-literal=user=a --from-literal=pass=b >/dev/null
 k create configmap b1 --from-literal=secret=s1 >/dev/null; k label configmap b1 bend-kube/bundle=true >/dev/null
-KUBECONFIG="$work/kc.json" "$work/bundle" > "$work/bundle.log" 2>&1 &
+BEND_KUBE_PORT=18083 KUBECONFIG="$work/kc.json" "$work/bundle" > "$work/bundle.log" 2>&1 &
 for _ in $(seq 1 30); do [ "$(k get cm b1-keys -o jsonpath='{.data.keys}' 2>/dev/null)" = '["pass","user"]' ] && break; sleep 1; done
 [ "$(k get cm b1-keys -o jsonpath='{.data.keys}')" = '["pass","user"]' ] && pass "reconcile reads a referenced secret from the cache" || fail "bundle keys"
 k patch secret s1 -p '{"stringData":{"token":"x"}}' >/dev/null
 for _ in $(seq 1 30); do k get cm b1-keys -o jsonpath='{.data.keys}' | grep token >/dev/null && break; sleep 1; done
 k get cm b1-keys -o jsonpath='{.data.keys}' | grep token >/dev/null && pass "a referenced secret's change reconciles its bundle" || fail "reference trigger"
 grep '"owned":"1"' "$work/bundle.log" >/dev/null && pass "owned outputs read from the cache" || fail "children"
+curl -s localhost:18083/metrics | grep '^bundle_syncs_total{bundle="b1"} ' >/dev/null \
+  && curl -s localhost:18083/metrics | grep '^bundle_secret_keys{bundle="b1"} 3' >/dev/null \
+  && pass "the controller's own metrics on /metrics" || fail "own metrics"
 kill -TERM "$(pgrep -f "$work/bundle")"
 for _ in $(seq 1 20); do pgrep -f "$work/bundle" >/dev/null || break; sleep 0.25; done
 pgrep -f "$work/bundle" >/dev/null && fail "bundle did not exit on SIGTERM" || true
