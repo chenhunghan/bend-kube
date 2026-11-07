@@ -512,6 +512,15 @@ law lease_short_lease_refused:
   {E.Lease.timing(5, 10000, 2000)
     == Some{"leader election: the lease duration must be longer than the renew deadline"} : Maybe<&2, String>}
 
+# A leader is late from the moment its renew deadline is reached, and it
+# never sleeps past it: after 9.9s of a 10s deadline it naps at most 0.1s,
+# however long its retry period.
+law leader_late_at_deadline:
+  {E.Lease.late(10000, 0, 10000) == True{} : Bool}
+
+law leader_nap_bounded:
+  {E.Lease.nap(9900, 0, 10000, 2000, True{}) == 100 : U32}
+
 # Conditions (apimachinery's meta.SetStatusCondition)
 # ---------------------------------------------------
 

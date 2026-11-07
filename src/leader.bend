@@ -84,28 +84,6 @@ type LEv is Type:
 def Leader.wrote(r: Result<&2, &2, Cl.KErr, J.Json>) -> Bool:
   Result.is_done(&2, &2, Cl.KErr, J.Json, r)
 
-def Leader.late(+now: U32, +last: U32, +deadline: U32) -> Bool:
-  U32.is_gt((now - last : U32), deadline)
-
-def Leader.room.left(+deadline: U32, +spent: U32, left: Bool) -> U32:
-  match left:
-    case True{}:
-      (deadline - spent : U32)
-    case False{}:
-      1
-
-def Leader.room.go(+deadline: U32, +spent: U32) -> U32:
-  Leader.room.left(deadline, spent, U32.is_lt(spent, deadline))
-
-# How long a lease call may take: while leading, what is left of the renew
-# deadline since the last renewal (at least 1ms); else the whole deadline.
-def Leader.room(+now: U32, +last: U32, +deadline: U32, leading: Bool) -> U32:
-  match leading:
-    case True{}:
-      Leader.room.go(deadline, (now - last : U32))
-    case False{}:
-      deadline
-
 def Leader.timed.of(m: Maybe<&1, Result<&2, &2, Cl.KErr, J.Json>>) -> Result<&2, &2, Cl.KErr, J.Json>:
   match m:
     case Some{r}:
@@ -161,24 +139,26 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
         w => IO.bind(U32, Unit, Leader.mono(),
           m => Leader.run(oc, f, LAt{T.Wall.of(w), m}, cfg, o, obs, leading, last, start)))
     case oc 1n+f LAt{+w, +m}:
-      IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
-        Leader.timed(Leader.room(m, last, LOpts.deadline(o), leading),
-          Cl.Client.get(cfg, LOpts.api(o), LOpts.name(o))),
-        r => IO.bind(U32, Unit, Leader.mono(),
-          m2 => Leader.run(oc, f, LRead{w, m2, r}, cfg, o, obs, leading, last, start)))
+      # a leader past its renew deadline stops before trying again
+      Leader.renewed(Bool.and(leading, E.Lease.late(m, last, LOpts.deadline(o))),
+        IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
+          Leader.timed(E.Lease.room(m, last, LOpts.deadline(o), leading),
+            Cl.Client.get(cfg, LOpts.api(o), LOpts.name(o))),
+          r => IO.bind(U32, Unit, Leader.mono(),
+            m2 => Leader.run(oc, f, LRead{w, m2, r}, cfg, o, obs, leading, last, start))))
     case oc 1n+f LRead{+w, +m, r}:
       Leader.run(oc, f, LDecided{m, Leader.decide(Leader.read(r), o, obs, m, w)}, cfg, o, obs,
         leading, last, start)
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LCreate{l}, ob}}}:
       IO.bind(U32, Unit, Leader.mono(),
         m1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
-          Leader.timed(Leader.room(m1, last, LOpts.deadline(o), leading),
+          Leader.timed(E.Lease.room(m1, last, LOpts.deadline(o), leading),
             Cl.Client.create(cfg, LOpts.api(o), l)),
           r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LUpdate{l}, ob}}}:
       IO.bind(U32, Unit, Leader.mono(),
         m1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
-          Leader.timed(Leader.room(m1, last, LOpts.deadline(o), leading),
+          Leader.timed(E.Lease.room(m1, last, LOpts.deadline(o), leading),
             Cl.Client.replace(cfg, LOpts.api(o), LOpts.name(o), l)),
           r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LWait{}, ob}}}:
@@ -189,7 +169,7 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
     case oc 1n+f LCheck{+now, ok}:
       # lateness by the clock after the calls, not before them
       IO.bind(U32, Unit, Leader.mono(),
-        m2 => Leader.run(oc, f, LWrote{now, ok, Leader.late(m2, last, LOpts.deadline(o))},
+        m2 => Leader.run(oc, f, LWrote{now, ok, E.Lease.late(m2, last, LOpts.deadline(o))},
           cfg, o, obs, leading, last, start))
     case oc 1n+f LWrote{now, True{}, late}:
       Leader.renewed(Bool.and(leading, late),
@@ -201,8 +181,9 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
     case oc 1n+f LFail{True{}}:
       Leader.lost()
     case oc 1n+f LFail{False{}}:
-      IO.bind(Unit, Unit, IO.sleep(LOpts.retry(o)),
-        u => Leader.run(oc, f, LTry{}, cfg, o, obs, leading, last, start))
+      IO.bind(U32, Unit, Leader.mono(),
+        m => IO.bind(Unit, Unit, IO.sleep(E.Lease.nap(m, last, LOpts.deadline(o), LOpts.retry(o), leading)),
+          u => Leader.run(oc, f, LTry{}, cfg, o, obs, leading, last, start)))
 
 def Leader.release.said(r: Result<&2, &2, Cl.KErr, J.Json>) -> IO(Bool):
   match r:
