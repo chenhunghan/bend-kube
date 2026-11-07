@@ -167,6 +167,6 @@ def main() -> IO(Unit):
     IO.print("owned by a cluster-scoped Tenant: " ++ fold_keys(cluster))
     IO.print("children of a, controller owners only: " ++ names(X.Ctx.children(c2, 1, site("a", "1", "10", "", "s1"))))
     IO.print("a Secret with its data dropped: " ++ J.Json.show(fold_obj(X.Fold.rel(X.RAll{}, res(),
-      X.Out.trim_all(["data", "stringData"], [W.OApply{js("{\"metadata\": {\"name\": \"s\", \"namespace\": \"web\"}, \"type\": \"Opaque\", \"data\": {\"k\": \"dg==\"}}")}]),
+      X.Out.trim_all(["data", "stringData"], [W.OApply{js("{\"metadata\": {\"name\": \"s\", \"namespace\": \"web\", \"annotations\": {\"kubectl.kubernetes.io/last-applied-configuration\": \"{data: v}\", \"team\": \"a\"}}, \"type\": \"Opaque\", \"data\": {\"k\": \"dg==\"}}")}]),
       prim, X.Fold{S.Store.new(), Nil{}, Nil{}}))))
     IO.print("fails in ctx: " ++ U32.show(X.Ctx.fails(X.Ctx.with_fails(c, 4))))

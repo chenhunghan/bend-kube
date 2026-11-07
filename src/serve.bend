@@ -83,7 +83,7 @@ def Serve.all_ready(ss: List<&2, R.Snap>) -> Bool:
   match ss:
     case Nil{}:
       True{}
-    case Con{R.Snap{nm, r, a, b, c, d, e, q, h, sm}, t}:
+    case Con{R.Snap{nm, r, a, b, c, d, e, q, h, sm, cz}, t}:
       Bool.and(r, Serve.all_ready(t))
 
 def Serve.ready.go(standby: Bool, ready: Bool) -> String:
@@ -111,7 +111,7 @@ def Serve.head(+name: String, kind: String, help: String) -> String:
 
 def Serve.snap.name(s: R.Snap) -> String:
   match s:
-    case R.Snap{n, r, a, b, c, d, e, q, h, sm}:
+    case R.Snap{n, r, a, b, c, d, e, q, h, sm, cz}:
       n
 
 def Serve.nth(xs: List<&2, String>, n: Nat) -> String:
@@ -127,7 +127,7 @@ def Serve.nth(xs: List<&2, String>, n: Nat) -> String:
 # 3 events, 4 running, 5 objects, 6 queued).
 def Serve.snap.field(s: R.Snap, +i: U32) -> String:
   match s:
-    case R.Snap{n, r, a, b, c, d, e, q, h, sm}:
+    case R.Snap{n, r, a, b, c, d, e, q, h, sm, cz}:
       Serve.nth([Serve.bool(r), U32.show(a), U32.show(b), U32.show(c), U32.show(d), U32.show(e),
         U32.show(q)], U32.to_nat(i))
 
@@ -153,11 +153,26 @@ def Serve.secs(x: R.Sum) -> String:
     case R.Sum{s, +m}:
       U32.show(s) ++ "." ++ Serve.pad3(m)
 
+def Serve.cache.go(+ctl: String, cz: List<&2, U32>, +i: U32) -> String:
+  match cz:
+    case Nil{}:
+      ""
+    case Con{c, t}:
+      "bendkube_cache_objects{controller=\"" ++ ctl ++ "\",cache=\"" ++ U32.show(i) ++ "\"} "
+        ++ U32.show(c) ++ "\n" ++ Serve.cache.go(ctl, t, (i + 1 : U32))
+
+def Serve.caches(ss: List<&2, R.Snap>) -> String:
+  match ss:
+    case Nil{}:
+      ""
+    case Con{R.Snap{n, r, a, b, c, d, e, q, h, sm, cz}, t}:
+      Serve.cache.go(n, cz, 1) ++ Serve.caches(t)
+
 def Serve.hist(ss: List<&2, R.Snap>, +name: String) -> String:
   match ss:
     case Nil{}:
       ""
-    case Con{R.Snap{+n, r, a, b, c, d, e, q, h, sm}, t}:
+    case Con{R.Snap{+n, r, a, b, c, d, e, q, h, sm, cz}, t}:
       Serve.buckets(name, n, Serve.les(), h, 0)
         ++ name ++ "_sum{controller=\"" ++ n ++ "\"} " ++ Serve.secs(sm) ++ "\n" ++ Serve.hist(t, name)
 
@@ -185,6 +200,8 @@ def Serve.text(+ss: List<&2, R.Snap>) -> String:
     ++ Serve.family(ss, "bendkube_store_objects", "gauge", "Objects in the primary store.", 5)
     ++ Serve.family(ss, "bendkube_store_ready", "gauge", "Whether every cache has listed.", 0)
     ++ Serve.family(ss, "bendkube_queue_depth", "gauge", "Keys waiting to reconcile.", 6)
+    ++ Serve.head("bendkube_cache_objects", "gauge", "Objects in each related watch's cache, by its number.")
+    ++ Serve.caches(ss)
     ++ Serve.head("bendkube_reconcile_duration_seconds", "histogram", "How long reconciles take.")
     ++ Serve.hist(ss, "bendkube_reconcile_duration_seconds")
 

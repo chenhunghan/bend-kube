@@ -90,8 +90,21 @@ def Kube.serve.go(+port: U32, +status: Chan(R.SMsg), off: Bool) -> IO(Unit):
     case False{}:
       IO.spawn(Unit, V.Serve.run(port, status))
 
-def Kube.serve(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):
+def Kube.port.of(+port: U32, e: Result<&1, &1, U32 & String, String>) -> U32:
+  match e:
+    case Done{v}:
+      Maybe.default(&2, U32, U32.read(v), port)
+    case Fail{x}:
+      port
+
+def Kube.serve.at(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):
   Kube.serve.go(port, status, U32.is_eq(port, 0))
+
+# The health and metrics port: BEND_KUBE_PORT when set (0 for none), else
+# Opts.port.
+def Kube.serve(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):
+  IO.bind(Result<&1, &1, U32 & String, String>, Unit, IO.get_env("BEND_KUBE_PORT"),
+    e => Kube.serve.at(Kube.port.of(port, e), status))
 
 # Without leader election: on SIGTERM or SIGINT, drain, then exit 0; a
 # second signal exits at once.

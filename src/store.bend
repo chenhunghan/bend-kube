@@ -18,12 +18,24 @@ type Store is Data:
 def Store.new() -> Store:
   Store{Map.new(&2, J.Json), Map.new(&2, J.Json), False{}}
 
-# What the store keeps of an object: all but metadata.managedFields, the
-# server-side apply bookkeeping that is often half an object's size and
-# that controllers do not read (kube-rs's and controller-runtime's usual
-# cache transform).
+def Store.slim.ann(+m: J.Json, none: Bool) -> J.Json:
+  match none:
+    case True{}:
+      m
+    case False{}:
+      J.Json.set(m, "annotations",
+        J.Json.del(J.Json.get(m, "annotations"), "kubectl.kubernetes.io/last-applied-configuration"))
+
+def Store.slim.meta(+x: J.Json, +m: J.Json) -> J.Json:
+  J.Json.set(x, "metadata", Store.slim.ann(m, J.Json.is_null(J.Json.get(m, "annotations"))))
+
+# What the store keeps of an object: all but metadata.managedFields (the
+# server-side apply bookkeeping, often half an object's size) and the
+# kubectl.kubernetes.io/last-applied-configuration annotation (a whole copy
+# of what kubectl applied, a Secret's data included). Controllers read
+# neither (kube-rs's and controller-runtime's usual cache transform).
 def Store.slim(+x: J.Json) -> J.Json:
-  J.Json.set(x, "metadata", J.Json.del(J.Json.get(x, "metadata"), "managedFields"))
+  Store.slim.meta(x, J.Json.del(J.Json.get(x, "metadata"), "managedFields"))
 
 def Store.apply(s: Store, o: W.Out) -> Store:
   match s o:

@@ -137,4 +137,22 @@ for _ in $(seq 1 40); do pgrep -f "$work/slow" >/dev/null || break; sleep 0.25; 
 grep -A2 '"draining reconciles"' "$work/slow.log" | grep '"end"' >/dev/null \
   && grep '"reconciles drained"' "$work/slow.log" >/dev/null && pass "SIGTERM waits for a running reconcile" || fail "drain mid-reconcile"
 
+echo "== leader election"
+kubectl create ns bend-kube-system >/dev/null 2>&1 || true
+holder() { kubectl -n bend-kube-system get lease bend-kube-website -o jsonpath='{.spec.holderIdentity}' 2>/dev/null; }
+HOSTNAME=replica-a BEND_KUBE_PORT=18081 KUBECONFIG="$work/kc.json" "$work/website" > "$work/lead-a.log" 2>&1 &
+pid_a=$!
+for _ in $(seq 1 30); do holder | grep '^replica-a_' >/dev/null && break; sleep 1; done
+HOSTNAME=replica-b BEND_KUBE_PORT=18082 KUBECONFIG="$work/kc.json" "$work/website" > "$work/lead-b.log" 2>&1 &
+pid_b=$!
+sleep 6
+holder | grep '^replica-a_' >/dev/null && ! grep '"became leader"' "$work/lead-b.log" >/dev/null \
+  && pass "one leader; the standby waits" || fail "two leaders"
+kill -TERM "$pid_a"
+for _ in $(seq 1 20); do holder | grep '^replica-b_' >/dev/null && break; sleep 0.5; done
+holder | grep '^replica-b_' >/dev/null && grep '"released leader lease"' "$work/lead-a.log" >/dev/null \
+  && pass "SIGTERM hands the lease over within seconds" || fail "handover"
+kill -TERM "$pid_b"; wait "$pid_b" 2>/dev/null || true
+kubectl -n bend-kube-system delete lease bend-kube-website >/dev/null 2>&1 || true
+
 echo; echo "all e2e tests pass"

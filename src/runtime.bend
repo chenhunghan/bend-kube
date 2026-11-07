@@ -38,7 +38,7 @@ type Msg is Data:
 # The controller's state as the health server reports it.
 type Snap is Data:
   Snap{name: String, ready: Bool, reconciles: U32, errors: U32, events: U32, running: U32,
-    objects: U32, queued: U32, hist: List<&2, U32>, sum: Sum}
+    objects: U32, queued: U32, hist: List<&2, U32>, sum: Sum, cached: List<&2, U32>}
 
 # The status keeper's inbox: a controller's latest snapshot (by its index),
 # or a query for all of them (none until a controller runs: a standby
@@ -64,7 +64,7 @@ def Sum.sane.go(+ms: U32, ok: Bool) -> U32:
     case False{}:
       0
 
-# A duration made absurd by the wall clock stepping back counts as 0.
+# A duration of a day or more (a sleeping laptop) counts as 0.
 def Sum.sane(+ms: U32) -> U32:
   Sum.sane.go(ms, U32.is_lt(ms, 86400000))
 
@@ -407,6 +407,13 @@ def Caches.set(cs: List<&2, S.Store>, n: Nat, x: S.Store) -> List<&2, S.Store>:
       x <> t
     case Con{s, t} 1n+k:
       s <> Caches.set(t, k, x)
+
+def Caches.sizes(cs: List<&2, S.Store>) -> List<&2, U32>:
+  match cs:
+    case Nil{}:
+      Nil{}
+    case Con{c, t}:
+      U32.from_nat(S.Store.size(c)) <> Caches.sizes(t)
 
 def Caches.ready(cs: List<&2, S.Store>) -> Bool:
   match cs:
@@ -785,7 +792,7 @@ def Ctl.snap(st: CState, name: String) -> Snap:
   match st:
     case CState{+s, +cs, +q, Stats{r, e, v, h, sm}, p, tm}:
       Snap{name, Bool.and(S.Store.ready(s), Caches.ready(cs)), r, e, v, Q.Queue.nrun(q),
-        U32.from_nat(S.Store.size(s)), Q.Queue.depth(q), h, sm}
+        U32.from_nat(S.Store.size(s)), Q.Queue.depth(q), h, sm, Caches.sizes(cs)}
 
 def CCtx.status(c: CCtx) -> Chan(SMsg):
   match c:
@@ -891,14 +898,16 @@ def Ctl.report(+key: String, +kind: String, a: Q.Action) -> IO(Unit):
     case _:
       IO.pure(Unit, Unit{})
 
-def Ctl.now(w: U32 & (U32 & U32)) -> U32:
-  T.Wall.ms(T.Wall.of(w))
+# The monotonic clock in ms (since boot, never stepped): requeue deadlines
+# and reconcile durations are measured by it.
+def Ctl.mono() -> IO(U32):
+  IO.bind(Nat, U32, IO.now(), n => IO.pure(U32, U32.from_nat(n)))
 
 def Ctl.job.end(+key: String, +a: Q.Action, +t0: U32, +kind: String, +chan: Chan(Msg)) ->
   IO(Result<&1, &1, Msg, Unit>):
-  IO.bind(U32 & (U32 & U32), Result<&1, &1, Msg, Unit>, Y.Sys.wall(),
-    w1 => IO.bind(Unit, Result<&1, &1, Msg, Unit>, Ctl.report(key, kind, a),
-      u => Chan.send(Msg, chan, MDone{key, a, (Ctl.now(w1) - t0 : U32)})))
+  IO.bind(U32, Result<&1, &1, Msg, Unit>, Ctl.mono(),
+    +t1 => IO.bind(Unit, Result<&1, &1, Msg, Unit>, Ctl.report(key, kind, a),
+      u => Chan.send(Msg, chan, MDone{key, a, (t1 - t0 : U32)})))
 
 def Ctl.timed_out(+to: U32, m: Maybe<&1, Q.Action>) -> Q.Action:
   match m:
@@ -925,8 +934,8 @@ def Ctl.job.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +
 # A reconcile, timed; a failure is logged; MDone answers on the channel.
 def Ctl.job(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx,
   +kind: String, +chan: Chan(Msg), +to: U32) -> IO(Result<&1, &1, Msg, Unit>):
-  IO.bind(U32 & (U32 & U32), Result<&1, &1, Msg, Unit>, Y.Sys.wall(),
-    w0 => Ctl.job.go(~rec, key, o, ctx, kind, chan, to, Ctl.now(w0)))
+  IO.bind(U32, Result<&1, &1, Msg, Unit>, Ctl.mono(),
+    t0 => Ctl.job.go(~rec, key, o, ctx, kind, chan, to, t0))
 
 # Starts a reconcile per job, each with the caches and its key's failure
 # count; each answers MDone on the channel.
@@ -954,8 +963,8 @@ def Ctl.run(~rec: J.Json -> X.Ctx -> IO(Q.Action), outer: Nat, fuel: Nat, ev: CE
     case o 1n+f CMsg{None{}}:
       IO.pure(Unit, Unit{})
     case o 1n+f CMsg{Some{m}}:
-      IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
-        w => Ctl.run(~rec, o, f, CTimed{m, Ctl.now(w)}, st, ctx))
+      IO.bind(U32, Unit, Ctl.mono(),
+        now => Ctl.run(~rec, o, f, CTimed{m, now}, st, ctx))
     case o 1n+f CTimed{m, +now}:
       Ctl.run(~rec, o, f, CHandled{Ctl.plan(Ctl.on_msg(Ctl.at(st, now), m, CCtx.spec(ctx)))}, st, ctx)
     case o 1n+f CHandled{(+st1, ss)}:
@@ -1000,7 +1009,7 @@ def Keeper.all.go(ks: List<&2, String>, +m: Map<&2, Snap>) -> List<&2, Snap>:
     case Nil{}:
       Nil{}
     case Con{k, t}:
-      Keeper.all.put(Map.get(Snap, Snap{"", False{}, 0, 0, 0, 0, 0, 0, Hist.zero(), Sum{0, 0}}, m, k),
+      Keeper.all.put(Map.get(Snap, Snap{"", False{}, 0, 0, 0, 0, 0, 0, Hist.zero(), Sum{0, 0}, Nil{}}, m, k),
         Keeper.all.go(t, m))
 
 def Keeper.all(+m: Map<&2, Snap>) -> List<&2, Snap>:

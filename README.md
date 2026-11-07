@@ -105,15 +105,18 @@ laws can range over all of the controller's logic.
 
 **Caching:** a relist builds a fresh buffer between Init and InitDone and
 swaps it in whole, so objects deleted while the watch was down disappear.
-Objects are cached without `metadata.managedFields`, the server-side apply
-bookkeeping that is often half an object's size (the transform kube-rs and
-controller-runtime users apply by hand).
+Objects are cached without `metadata.managedFields` (the server-side apply
+bookkeeping, often half an object's size) and without the
+`kubectl.kubernetes.io/last-applied-configuration` annotation (a whole
+copy of what kubectl applied, a Secret's data included). These are the
+transforms kube-rs and controller-runtime users apply by hand.
 
 **Controllers** (`src/control.bend`; kube-runtime's `Controller` builder):
 `X.Spec.of(api)` names the primary, and
 `Kube.control(~rec, spec, opts)` runs it with `rec(obj, ctx)`:
 
-- `X.Spec.owns(s, api)` watches objects the primary owns. An event on one
+- `X.Spec.owns(s, api)` watches objects the primary owns. To narrow the
+  watch by label, use `X.Spec.watches_where(s, api, label, "", X.ROwner{})`. An event on one
   (deletions included) queues the owners it names that have the primary's
   kind and API group.
   - A namespaced primary is looked up in the child's namespace.
@@ -153,8 +156,12 @@ controller-runtime users apply by hand).
   `X.Spec.max` sets how many reconciles run at once (default 8, at least 1).
 - `X.Spec.timeout(s, ms)` treats a reconcile still running after ms as
   failed: it is retried with backoff and its key and slot are freed. The
-  late run is not cancelled, so it must stay idempotent. The default is no
-  limit, because each limit holds a sleeping timer.
+  late run is not cancelled, so it must stay idempotent.
+  - The default is no limit. Each limit holds a sleeper until it expires,
+    even after the reconcile finishes, so a five-minute timeout at 100
+    reconciles a second holds 30,000 sleepers.
+  - Without a limit, a hung reconcile holds its slot. `bendkube_reconcile_running`
+    stuck at the maximum shows it.
 - **Reconcile context:** `ctx` gives:
   - the client config (`X.Ctx.cfg`) and the controller's index
     (`X.Ctx.idx`);
@@ -205,10 +212,10 @@ controller-runtime users apply by hand).
   concurrently.
 - Errors back off per key, from 5ms doubling to at most 1000s.
 - A delayed requeue is staled by any newer add.
-- A key has at most one pending wake, the earliest asked for, with one
-  sleeper (kube-runtime's scheduler). Requeues never pile up timers.
-  Delays of a second or more get up to 10% jitter, so requeues armed
-  together spread out.
+- A key has at most one pending wake, the earliest asked for by the
+  monotonic clock, with one sleeper (kube-runtime's scheduler). Requeues
+  never pile up timers. Delays of a second or more get up to 10% jitter, so
+  requeues armed together spread out.
 - When a key leaves the queue and its object is gone, its bookkeeping is
   forgotten. That covers objects deleted while their key ran or waited, and
   objects a relist dropped.
@@ -254,8 +261,10 @@ deadline):
   (`HOSTNAME`) plus a random suffix. Two replicas can't share an identity,
   which would let both renew. `Opts.with_lease(o, E.LOpts{..})` sets the
   identity, Lease duration, renew deadline and retry period by hand.
-- A step of the wall clock never makes a live Lease look expired: time
-  that runs backwards counts as none.
+- Every timing decision (Lease expiry, the renew deadline, lateness)
+  uses the monotonic clock, as client-go does. The wall clock only stamps
+  the Lease, so stepping it either way changes nothing. Time that runs
+  backwards still counts as none.
 
 **Shutdown:** on SIGTERM or SIGINT, with or without leader election, every
 controller stops starting reconciles. The process waits for the running
@@ -356,7 +365,8 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
 
 - Logs are one JSON object per line on stderr.
 - `/healthz`, `/readyz` and `/metrics` are served on `:8080`
-  (`Opts.with_port`, 0 for none). `/readyz` answers:
+  (`Opts.with_port`; the `BEND_KUBE_PORT` environment variable overrides
+  it; 0 for none). `/readyz` answers:
   - 503 until every cache is synced;
   - `standby` on a replica that isn't the leader;
   - 503 if the status keeper does not answer within 2s.
@@ -370,7 +380,9 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   `bendkube_reconcile_duration_seconds` (a histogram with Prometheus'
   default buckets), `bendkube_watch_events_total`,
   `bendkube_reconcile_running`, `bendkube_queue_depth`,
-  `bendkube_store_objects`, `bendkube_store_ready` and `bendkube_leader`.
+  `bendkube_store_objects` (the primary's cache),
+  `bendkube_cache_objects{cache="n"}` (each related watch's cache),
+  `bendkube_store_ready` and `bendkube_leader`.
   Counters are 32-bit and wrap; Prometheus reads a wrap as a reset. The
   duration sum is kept in seconds and lasts 136 years. A duration made
   absurd by the wall clock stepping back counts as 0.
@@ -453,7 +465,7 @@ tools/ci.sh                      # laws, --verdict, module checks, tests, genera
 tests/run.sh                     # unit and scenario tests (UPDATE=1 rewrites expectations)
 tests/tls.sh                     # TLS and proxies against local servers, both lanes, sanitizers
 tests/package.sh                 # publish to a stand-in hub, build a controller from the package
-KUBECONFIG=test.yaml tests/e2e.sh   # on a disposable cluster: operator, finalizer, shared watches, cached reads, drain, rate limit
+KUBECONFIG=test.yaml tests/e2e.sh   # on a disposable cluster: operator, finalizer, shared watches, cached reads, drain, rate limit, leader handover
 ./y2j crd.yaml > crd.json && tools/gen.py crd crd.json -o gen/my.bend   # typed CRD views (--lib bend-kube-runtime@X.Y.Z.0/src outside this repo)
 cd examples && bend mirror.bend -o mirror && KUBECONFIG=~/.kube/config ./mirror
 docker build --build-arg EXAMPLE=mirror -t bend-kube-mirror .   # proof-gated image
@@ -559,6 +571,8 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
   - SIGTERM waiting for a running reconcile, then exiting 0, with and
     without leader election (the Lease is released after the drain);
   - the rate limit: 13 requests at 4 qps with a burst of 2 took 2.77s.
+  - two replicas: one leader, the standby waiting, and SIGTERM handing
+    the Lease to the standby within seconds (also in `tests/e2e.sh`).
 
 ## Scope
 
@@ -567,6 +581,14 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
   That came to 204 MB RSS for 20,000 of them. Size memory limits by the objects a controller caches,
   and narrow its watches with namespaces (`C.InNs`) and label selectors
   (`X.Spec.label`, `X.Spec.watches_where`).
+- **Relist peak.** A relist builds the new cache beside the old one and
+  swaps it in whole, so for a moment the process holds about twice the
+  cache.
+- **Writes need a namespace.** A write goes to the namespace its `C.Api`
+  names. Build `C.Api{res, C.InNs{ns}}` from the object, because an
+  `AllNs` api has no namespace in its path.
+- **Finalizer RBAC.** Finalizers are written with JSON patches, so a
+  controller using them needs `patch` on its primary.
 - **Relations scan.** `RRef` and `RAll` look through the primary's cache
   for each related event, and `X.Ctx.children` looks through a related
   cache. That is linear in the cache's size, which is fine for thousands of
@@ -588,9 +610,6 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
   general HTTP client for external systems.
 - **Typed patches.** Generated encoders omit absent fields, so a merge
   patch can't clear one; send `null` by hand when a field must go.
-- **Requeue clock.** Pending wakes are compared by the wall clock. A
-  forward jump can make a shorter requeue wait for an earlier-armed one,
-  up to that one's deadline.
 
 These are choices, matching kube-rs's defaults:
 

@@ -4,6 +4,8 @@ name: e2e
 # and draining on SIGTERM, all on a real API server.
 on:
   pull_request:
+  push:
+    branches: [master]
   workflow_dispatch:
 permissions:
   contents: read

@@ -19,5 +19,5 @@ ctx find web/a-db: a-db
 related relist drops a-db and b-web: keys: web/a web/a web/b web/a; gone: -
 owned by a cluster-scoped Tenant: keys: t1; gone: -
 children of a, controller owners only: a-web
-a Secret with its data dropped: {"metadata":{"name":"s","namespace":"web"},"type":"Opaque"}
+a Secret with its data dropped: {"metadata":{"name":"s","namespace":"web","annotations":{"team":"a"}},"type":"Opaque"}
 fails in ctx: 4

@@ -63,19 +63,19 @@ def Leader.read(r: Result<&2, &2, Cl.KErr, J.Json>) -> Result<&2, &2, Cl.KErr, M
     case Fail{+e}:
       Leader.read.err(e, U32.is_eq(Cl.KErr.code(e), 404))
 
-def Leader.decide(r: Result<&2, &2, Cl.KErr, Maybe<&2, J.Json>>, +o: LOpts, +obs: E.Obs,
+def Leader.decide(r: Result<&2, &2, Cl.KErr, Maybe<&2, J.Json>>, +o: LOpts, +obs: E.Obs, +mono: U32,
   +w: T.Wall) -> Result<&2, &2, Cl.KErr, E.Decision>:
   match r o:
     case Done{cur} LOpts{ns, n, id, d, dl, rt}:
-      Done{E.Lease.decide(cur, ns, n, id, obs, T.Wall.ms(w), d, T.Wall.micro(w))}
+      Done{E.Lease.decide(cur, ns, n, id, obs, mono, d, T.Wall.micro(w))}
     case Fail{e} _:
       Fail{e}
 
 # What the loop just saw.
 type LEv is Type:
   LTry{}
-  LAt{w: T.Wall}
-  LRead{w: T.Wall, r: Result<&2, &2, Cl.KErr, J.Json>}
+  LAt{w: T.Wall, mono: U32}
+  LRead{w: T.Wall, mono: U32, r: Result<&2, &2, Cl.KErr, J.Json>}
   LDecided{now: U32, d: Result<&2, &2, Cl.KErr, E.Decision>}
   LCheck{now: U32, ok: Bool}
   LWrote{now: U32, ok: Bool, late: Bool}
@@ -119,8 +119,11 @@ def Leader.timed(+ms: U32, act: IO(Result<&2, &2, Cl.KErr, J.Json>)) -> IO(Resul
     IO.within(Result<&2, &2, Cl.KErr, J.Json>, ms, act),
     m => IO.pure(Result<&2, &2, Cl.KErr, J.Json>, Leader.timed.of(m)))
 
-def Leader.ms(w: U32 & (U32 & U32)) -> U32:
-  T.Wall.ms(T.Wall.of(w))
+# The monotonic clock in ms (time since boot, never stepped): every timing
+# decision (expiry, the renew deadline, lateness) uses it; the wall clock
+# only stamps the Lease.
+def Leader.mono() -> IO(U32):
+  IO.bind(Nat, U32, IO.now(), n => IO.pure(U32, U32.from_nat(n)))
 
 # On first acquiring: log and start the work.
 def Leader.started(leading: Bool, start: Maybe<&1, IO(Unit)>) -> IO(Unit):
@@ -145,25 +148,26 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
       Leader.run(oc, 4294967295n, e, cfg, o, obs, leading, last, start)
     case oc 1n+f LTry{}:
       IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
-        w => Leader.run(oc, f, LAt{T.Wall.of(w)}, cfg, o, obs, leading, last, start))
-    case oc 1n+f LAt{+w}:
+        w => IO.bind(U32, Unit, Leader.mono(),
+          m => Leader.run(oc, f, LAt{T.Wall.of(w), m}, cfg, o, obs, leading, last, start)))
+    case oc 1n+f LAt{+w, +m}:
       IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
-        Leader.timed(Leader.room(T.Wall.ms(w), last, LOpts.deadline(o), leading),
+        Leader.timed(Leader.room(m, last, LOpts.deadline(o), leading),
           Cl.Client.get(cfg, LOpts.api(o), LOpts.name(o))),
-        r => Leader.run(oc, f, LRead{w, r}, cfg, o, obs, leading, last, start))
-    case oc 1n+f LRead{+w, r}:
-      Leader.run(oc, f, LDecided{T.Wall.ms(w), Leader.decide(Leader.read(r), o, obs, w)}, cfg, o, obs,
+        r => Leader.run(oc, f, LRead{w, m, r}, cfg, o, obs, leading, last, start))
+    case oc 1n+f LRead{+w, +m, r}:
+      Leader.run(oc, f, LDecided{m, Leader.decide(Leader.read(r), o, obs, m, w)}, cfg, o, obs,
         leading, last, start)
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LCreate{l}, ob}}}:
-      IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
-        w1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
-          Leader.timed(Leader.room(Leader.ms(w1), last, LOpts.deadline(o), leading),
+      IO.bind(U32, Unit, Leader.mono(),
+        m1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
+          Leader.timed(Leader.room(m1, last, LOpts.deadline(o), leading),
             Cl.Client.create(cfg, LOpts.api(o), l)),
           r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LUpdate{l}, ob}}}:
-      IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
-        w1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
-          Leader.timed(Leader.room(Leader.ms(w1), last, LOpts.deadline(o), leading),
+      IO.bind(U32, Unit, Leader.mono(),
+        m1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
+          Leader.timed(Leader.room(m1, last, LOpts.deadline(o), leading),
             Cl.Client.replace(cfg, LOpts.api(o), LOpts.name(o), l)),
           r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LWait{}, ob}}}:
@@ -173,8 +177,8 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
         u => Leader.run(oc, f, LCheck{now, False{}}, cfg, o, obs, leading, last, start))
     case oc 1n+f LCheck{+now, ok}:
       # lateness by the clock after the calls, not before them
-      IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
-        w2 => Leader.run(oc, f, LWrote{now, ok, Leader.late(Leader.ms(w2), last, LOpts.deadline(o))},
+      IO.bind(U32, Unit, Leader.mono(),
+        m2 => Leader.run(oc, f, LWrote{now, ok, Leader.late(m2, last, LOpts.deadline(o))},
           cfg, o, obs, leading, last, start))
     case oc 1n+f LWrote{now, True{}, late}:
       IO.bind(Unit, Unit, Leader.started(leading, start),
