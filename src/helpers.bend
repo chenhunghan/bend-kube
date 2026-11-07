@@ -194,6 +194,12 @@ def Metrics.send(m: Maybe<&2, Chan(X.Meter)>, x: X.Meter) -> IO(Unit):
 def Metrics.add(c: X.Ctx, name: String, labels: String, n: U32) -> IO(Unit):
   Metrics.send(X.Ctx.meter(c), X.MAdd{name, labels, n})
 
+# Drops one series (by name and labels), as when the object its labels name
+# is deleted: series labeled by object live until dropped, so drop them to
+# keep /metrics bounded by the live objects.
+def Metrics.drop(c: X.Ctx, name: String, labels: String) -> IO(Unit):
+  Metrics.send(X.Ctx.meter(c), X.MDrop{name, labels})
+
 # Sets the controller's gauge name.
 def Metrics.set(c: X.Ctx, name: String, labels: String, v: U32) -> IO(Unit):
   Metrics.send(X.Ctx.meter(c), X.MSet{name, labels, v})

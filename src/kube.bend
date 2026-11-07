@@ -108,11 +108,11 @@ def Kube.serve(+port: U32, +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(U
 
 # Without leader election: on SIGTERM or SIGINT, drain, then exit 0; a
 # second signal exits at once.
-def Kube.on_signal(drain: IO(Unit)) -> IO(Unit):
+def Kube.on_signal(drain: IO(Bool)) -> IO(Unit):
   IO.bind(U32, Unit, Y.Sys.signal(),
     sig => IO.bind(Unit, Unit, L.Log.info("terminating", [L.Log.kv("signal", U32.show(sig))]),
       u => IO.bind(Unit, Unit, IO.spawn(Unit, E.Leader.again()),
-        u1 => IO.bind(Unit, Unit, drain, u2 => IO.exit(0)))))
+        u1 => IO.bind(Bool, Unit, drain, d => IO.exit(0)))))
 
 def Kube.ident.of(h: Result<&1, &1, U32 & String, String>, r: Result<&1, &1, U32 & String, U32>) ->
   String:
@@ -132,7 +132,7 @@ def Kube.ident() -> IO(String):
     h => IO.bind(Result<&1, &1, U32 & String, U32>, String, IO.random_u32(),
       r => IO.pure(String, Kube.ident.of(h, r))))
 
-def Kube.elect.as(+cfg: K.Config, lo: E.LOpts, drain: IO(Unit), work: IO(Unit), auto: Bool) -> IO(Unit):
+def Kube.elect.as(+cfg: K.Config, lo: E.LOpts, drain: IO(Bool), work: IO(Unit), auto: Bool) -> IO(Unit):
   match lo auto:
     case E.LOpts{ns, n, id, d, dl, rt} True{}:
       IO.bind(String, Unit, Kube.ident(),
@@ -141,7 +141,7 @@ def Kube.elect.as(+cfg: K.Config, lo: E.LOpts, drain: IO(Unit), work: IO(Unit), 
     case x False{}:
       E.Leader.elect(cfg, x, drain, work)
 
-def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Unit), work: IO(Unit)) -> IO(Unit):
+def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Bool), work: IO(Unit)) -> IO(Unit):
   match l:
     case Some{+lo}:
       Kube.elect.as(cfg, lo, drain, work, String.is_empty(E.LOpts.id(lo)))

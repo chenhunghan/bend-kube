@@ -126,6 +126,11 @@ def failed.of(r: Result<&2, &2, Cl.KErr, J.Json>) -> String:
 def failed(+code: U32, body: String) -> String:
   failed.of(Cl.Client.json.of(Done{Cl.Reply{code, body}}))
 
+def waits(st: R.CState, +key: String) -> Bool:
+  match st:
+    case R.CState{s, cs, q, x, p, t}:
+      Q.Queue.waiting(q, key)
+
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
   # (their objects deleted), the third is live: dispatch must reach it.
@@ -143,7 +148,15 @@ def main() -> IO(Unit):
   # runs; the 33000 one fires and the key runs.
   +stale = st(R.Ctl.on_wake(s3, "ns/live", 61000))
   +fired = st(R.Ctl.on_wake(s3, "ns/live", 33000))
+  # A relist in two pages after an outage: a new object on the first page
+  # must not run (and be dropped) before the second page swaps the cache in.
+  +page1 = planned(msg(listed, R.MOuts{0, [W.OInit{}, W.OInitApply{cm("new")}]}, 6000, 1))
+  +page2 = planned(msg(dispatched(R.Ctl.dispatch(page1)),
+    R.MOuts{0, [W.OInitApply{cm("live")}, W.OInitDone{}]}, 7000, 1))
   do IO<Unit>:
+    IO.print("relist page 1 of 2 (new object): runs " ++ jobs(R.Ctl.dispatch(page1)))
+    IO.print("relist page 2 of 2 (swap): runs " ++ jobs(R.Ctl.dispatch(page2))
+      ++ "; ns/new waits its turn (one slot): " ++ Bool.show(waits(dispatched(R.Ctl.dispatch(page2)), "ns/new")))
     IO.print("dispatch with gone keys ahead of a live one: " ++ jobs(R.Ctl.dispatch(gone)))
     IO.print("requeue 60s at t=1000: sleeper " ++ sleeps(msg(run0, R.MDone{"ns/live", Q.Requeue{60000}, 5}, 1000, 1)))
     IO.print("requeue 30s at t=3000: sleeper " ++ sleeps(msg(run1, R.MDone{"ns/live", Q.Requeue{30000}, 5}, 3000, 1)))

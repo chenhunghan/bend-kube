@@ -87,7 +87,7 @@ def KErr.retry_after(e: KErr) -> Maybe<&2, U32>:
 def KErr.action.go(+e: KErr, m: Maybe<&2, U32>) -> Q.Action:
   match m:
     case Some{+n}:
-      Q.RetryIn{KErr.show(e), (n * 1000 : U32)}
+      Q.RetryIn{KErr.show(e), (U32.min(n, 4294967) * 1000 : U32)}
     case None{}:
       Q.Retry{KErr.show(e)}
 

@@ -99,13 +99,33 @@ def Lease.observe(+l: J.Json, o: Obs, +now: U32) -> Obs:
       Lease.observe.go(Lease.holder(l), Lease.renew_time(l), Obs{h, r, at}, now,
         Bool.and(String.eq(h, Lease.holder(l)), String.eq(r, Lease.renew_time(l))))
 
+def Lease.duration.pos(+d: U32, +dur: U32, zero: Bool) -> U32:
+  match zero:
+    case True{}:
+      dur
+    case False{}:
+      d
+
+def Lease.duration.go(m: Maybe<&2, U32>, +dur: U32) -> U32:
+  match m:
+    case Some{+d}:
+      Lease.duration.pos(d, dur, U32.is_eq(d, 0))
+    case None{}:
+      dur
+
+# The holder's own lease duration (spec.leaseDurationSeconds), so a
+# contender configured shorter cannot expire a holder early; ours when the
+# Lease does not say.
+def Lease.duration(+l: J.Json, +dur: U32) -> U32:
+  Lease.duration.go(J.Json.as_u32(Lease.spec(l, "leaseDurationSeconds")), dur)
+
 # Whether another holder's lease is still live by our clock.
 def Lease.held(+l: J.Json, +me: String, o: Obs, +now: U32, +dur: U32) -> Bool:
   match o:
     case Obs{h, r, +at}:
       Bool.and(Bool.not(String.is_empty(Lease.holder(l))),
         Bool.and(Bool.not(String.eq(Lease.holder(l), me)),
-          U32.is_lt(Lease.elapsed(now, at), (dur * 1000 : U32))))
+          U32.is_lt(Lease.elapsed(now, at), (Lease.duration(l, dur) * 1000 : U32))))
 
 def Lease.take.go(+l: J.Json, me: String, +dur: U32, +now: String, ours: Bool) -> J.Json:
   match ours:

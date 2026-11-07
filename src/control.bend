@@ -75,13 +75,14 @@ def Pred.deleting(d: Bool) -> String:
     case False{}:
       "live"
 
-# What the predicates see of an object, its deletion and finalizers
-# included: a finalizer added or removed (by this controller or another)
+# What the predicates see of an object, its uid, deletion and finalizers
+# included: an object deleted and recreated under the same name (a new uid)
+# always passes, whatever its generation; a finalizer added or removed (by this controller or another)
 # always passes, so a controller that adds its finalizer and waits for
 # the change is woken by it.
 def Pred.print(ps: List<&2, Pred>, +o: J.Json) -> String:
-  Pred.print.go(ps, o) ++ Pred.deleting(C.Obj.is_deleting(o)) ++ "\n"
-    ++ J.Json.show(C.Obj.meta(o, "finalizers"))
+  "uid:" ++ C.Obj.uid(o) ++ "\n" ++ Pred.print.go(ps, o) ++ Pred.deleting(C.Obj.is_deleting(o))
+    ++ "\n" ++ J.Json.show(C.Obj.meta(o, "finalizers"))
 
 def Pred.changed(+ps: List<&2, Pred>, old: Maybe<&2, J.Json>, +new: J.Json) -> Bool:
   match old:
@@ -380,9 +381,10 @@ def Spec.max(s: Spec, n: U32) -> Spec:
     case Spec{p, l, fs, ps, ss, x, to}:
       Spec{p, l, fs, ps, ss, U32.max(n, 1), to}
 
-# A reconcile still running after ms is treated as failed (retried with
-# backoff) and its key freed; the late run is not cancelled, so it must
-# stay idempotent.
+# A reconcile still running after ms is hung: the process logs it and
+# exits (status 1), so the pod restarts, as a crash would. A reconcile in
+# Bend cannot be cancelled, and freeing its key while it still runs would
+# let the same key run twice.
 def Spec.timeout(s: Spec, ms: U32) -> Spec:
   match s:
     case Spec{p, l, fs, ps, ss, m, x}:
@@ -510,6 +512,7 @@ def Out.trim_all(+fs: List<&2, String>, os: List<&2, W.Out>) -> List<&2, W.Out>:
 type Meter is Data:
   MAdd{name: String, labels: String, n: U32}
   MSet{name: String, labels: String, v: U32}
+  MDrop{name: String, labels: String}
   MRead{reply: Chan(String)}
 
 # The reconcile context

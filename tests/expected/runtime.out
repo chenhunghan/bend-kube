@@ -1,3 +1,5 @@
+relist page 1 of 2 (new object): runs none
+relist page 2 of 2 (swap): runs ns/live; ns/new waits its turn (one slot): True
 dispatch with gone keys ahead of a live one: ns/live
 requeue 60s at t=1000: sleeper ns/live at 61000
 requeue 30s at t=3000: sleeper ns/live at 33000
