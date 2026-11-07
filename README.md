@@ -184,7 +184,8 @@ transforms kube-rs and controller-runtime users apply by hand.
   `Cl.KErr.action(e)` picks for it. It answers `RetryIn` with the delay the
   server named, and `Retry` otherwise. The delay is the Status body's
   `details.retryAfterSeconds`, else the `Retry-After` header (in seconds,
-  so a proxy's plain 429 counts too); `Cl.KErr.retry_after` exposes it. Both are logged as
+  so a proxy's plain 429 counts too), capped at 1000s like the key's own
+  backoff; `Cl.KErr.retry_after` exposes it. Both are logged as
   warnings with the key and count as errors. `Hold{ms}` means "not done
   yet, look again after ms" and isn't an error. `Cl.KErr` has
   `is_conflict`, `is_not_found`, `is_already_exists` and `is_throttled`.

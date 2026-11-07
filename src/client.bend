@@ -24,8 +24,9 @@ import ./queue.bend as Q
 def Res(-A: Type) -> Type:
   Result<&1, &1, U32 & String, A>
 
-# KRetry: an API error whose Status names a delay (details.retryAfterSeconds,
-# as the API server sends with 429 and some 5xx answers).
+# KRetry: an API error that names a delay: the Status body's
+# details.retryAfterSeconds, else the Retry-After header (seconds), as the
+# API server sends with 429 and some 5xx answers.
 type KErr is Data:
   KNet{code: U32, msg: String}
   KApi{status: C.Status}
@@ -88,12 +89,14 @@ def KErr.retry_after(e: KErr) -> Maybe<&2, U32>:
 def KErr.action.go(+e: KErr, m: Maybe<&2, U32>) -> Q.Action:
   match m:
     case Some{+n}:
-      Q.RetryIn{KErr.show(e), (U32.min(n, 4294967) * 1000 : U32)}
+      Q.RetryIn{KErr.show(e), (U32.min(n, 1000) * 1000 : U32)}
     case None{}:
       Q.Retry{KErr.show(e)}
 
 # What a reconcile answers after a failed call: retry after the delay the
-# server named (a 429's Retry-After), else retry with the key's backoff.
+# server named (a 429's Retry-After), at most 1000s (the key backoff's own
+# cap, so a bad value cannot park a key for weeks), else retry with the
+# key's backoff.
 def KErr.action(+e: KErr) -> Q.Action:
   KErr.action.go(e, KErr.retry_after(e))
 

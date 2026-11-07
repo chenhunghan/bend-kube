@@ -957,13 +957,6 @@ def Ctl.job.end(+key: String, +a: Q.Action, +t0: U32, +kind: String, +chan: Chan
     +t1 => IO.bind(Unit, Result<&1, &1, Msg, Unit>, Ctl.report(key, kind, a),
       u => Chan.send(Msg, chan, MDone{key, a, (t1 - t0 : U32)})))
 
-def Ctl.timed_out(+to: U32, m: Maybe<&1, Q.Action>) -> Q.Action:
-  match m:
-    case Some{a}:
-      a
-    case None{}:
-      Q.Retry{"reconcile timed out after " ++ U32.show(to) ++ "ms"}
-
 def Ctl.hung(+key: String, +to: U32, m: Maybe<&1, Q.Action>) -> IO(Q.Action):
   match m:
     case Some{a}:
