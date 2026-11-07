@@ -9,6 +9,7 @@ import ./src/http.bend as H
 import ./src/utf8.bend as U
 import ./src/proxy.bend as P
 import ./src/control.bend as X
+import ./src/cond.bend as Co
 
 # LAWS
 # ====
@@ -384,13 +385,78 @@ law fold_delete_forgets:
   {X.Fold.prim(ps, [W.ODelete{x}], X.Fold{s, ks, g})
     == X.Fold{S.Store.apply(s, W.ODelete{x}), ks, C.Obj.key(x) <> g} : X.Fold}
 
-# An owned object reconciles the owner of the primary's kind it names, in
-# its own namespace (kube-runtime's trigger_owners).
+# An owned object reconciles the owner it names of the primary's kind and
+# API group, in its own namespace (kube-runtime's trigger_owners).
 law owner_triggers_owner:
   for prim: S.Store
-  {X.Rel.keys(X.ROwner{}, "Website",
+  {X.Rel.keys(X.ROwner{}, C.Res{"bend-kube.dev", "v1alpha1", "Website", "websites", True{}},
     J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"w-web"}},
       J.KV{"namespace", J.JStr{"default"}},
-      J.KV{"ownerReferences", J.Json.arr([J.Json.obj([J.KV{"kind", J.JStr{"Website"}},
+      J.KV{"ownerReferences", J.Json.arr([J.Json.obj([
+        J.KV{"apiVersion", J.JStr{"bend-kube.dev/v1alpha1"}}, J.KV{"kind", J.JStr{"Website"}},
         J.KV{"name", J.JStr{"w"}}])])}])}]), prim)
     == ["default/w"] : List<&2, String>}
+
+# A cluster-scoped primary is named by its owned objects without their
+# namespace, so a namespaced child reconciles it.
+law owner_triggers_cluster_owner:
+  for prim: S.Store
+  {X.Rel.keys(X.ROwner{}, C.Res{"bend-kube.dev", "v1", "Tenant", "tenants", False{}},
+    J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"quota"}},
+      J.KV{"namespace", J.JStr{"team-a"}},
+      J.KV{"ownerReferences", J.Json.arr([J.Json.obj([
+        J.KV{"apiVersion", J.JStr{"bend-kube.dev/v1"}}, J.KV{"kind", J.JStr{"Tenant"}},
+        J.KV{"name", J.JStr{"a"}}])])}])}]), prim)
+    == ["a"] : List<&2, String>}
+
+# An owner of the same kind in another API group is not the primary.
+law owner_needs_group:
+  for prim: S.Store
+  {X.Rel.keys(X.ROwner{}, C.Res{"bend-kube.dev", "v1alpha1", "Website", "websites", True{}},
+    J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"w-web"}},
+      J.KV{"namespace", J.JStr{"default"}},
+      J.KV{"ownerReferences", J.Json.arr([J.Json.obj([
+        J.KV{"apiVersion", J.JStr{"other.io/v1"}}, J.KV{"kind", J.JStr{"Website"}},
+        J.KV{"name", J.JStr{"w"}}])])}])}]), prim)
+    == Nil{} : List<&2, String>}
+
+# Under any predicate, a change of finalizers (one added, as a finalizer
+# helper does before waiting for the change) reconciles.
+law filter_finalizer_passes:
+  for r1: String
+  for r2: String
+  for a: J.Json
+  for b: J.Json
+  for f: String
+  {X.Pred.passes([X.PGeneration{}], Some{Ex.obj(J.JNum{"3"}, r1, J.JNull{}, a)},
+    J.Json.set(Ex.obj(J.JNum{"3"}, r2, J.JNull{}, b), "metadata",
+      J.Json.set(J.Json.get(Ex.obj(J.JNum{"3"}, r2, J.JNull{}, b), "metadata"), "finalizers",
+        J.Json.arr([J.JStr{f}])))) == True{} : Bool}
+
+# Conditions (apimachinery's meta.SetStatusCondition)
+# ---------------------------------------------------
+
+# Setting a condition whose status is unchanged keeps its transition time.
+law cond_same_status_keeps_time:
+  for r1: String
+  for m1: String
+  for t0: String
+  for r2: String
+  for m2: String
+  for g: String
+  for now: String
+  {Co.Cond.get(Co.Cond.set([Co.Cond.make("Ready", "True", r1, m1, "1", t0)],
+    Co.Cond.make("Ready", "True", r2, m2, "2", now)), "Ready")
+    == Some{Co.Cond.make("Ready", "True", r2, m2, "2", t0)} : Maybe<&2, J.Json>}
+
+# A changed status takes the new transition time.
+law cond_new_status_moves_time:
+  for r1: String
+  for m1: String
+  for t0: String
+  for r2: String
+  for m2: String
+  for now: String
+  {Co.Cond.get(Co.Cond.set([Co.Cond.make("Ready", "False", r1, m1, "1", t0)],
+    Co.Cond.make("Ready", "True", r2, m2, "2", now)), "Ready")
+    == Some{Co.Cond.make("Ready", "True", r2, m2, "2", now)} : Maybe<&2, J.Json>}

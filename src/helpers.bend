@@ -5,6 +5,7 @@ import ./config.bend as K
 import ./client.bend as Cl
 import ./queue.bend as Q
 import ./finalizer.bend as F
+import ./control.bend as X
 import ./sys.bend as Y
 import ./time.bend as T
 import ./log.bend as L
@@ -41,6 +42,8 @@ def Fin.cleaned(+cfg: K.Config, api: C.Api, name: String, patch: J.Json, a: Q.Ac
   match a:
     case Q.Retry{m}:
       IO.pure(Q.Action, Q.Retry{m})
+    case Q.RetryIn{m, ms}:
+      IO.pure(Q.Action, Q.RetryIn{m, ms})
     case +x:
       IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Q.Action, Cl.Client.patch(cfg, api, name, C.PJson{}, patch),
         r => Fin.removed(x, r))
@@ -65,6 +68,29 @@ def Finalizer.run(~apply: J.Json -> K.Config -> IO(Q.Action),
   ~cleanup: J.Json -> K.Config -> IO(Q.Action), +cfg: K.Config, +api: C.Api, name: String,
   +o: J.Json) -> IO(Q.Action):
   Fin.run.go(~apply, ~cleanup, cfg, api, o, F.Fin.state(o, name))
+
+def Fin.ctl.go(~apply: J.Json -> X.Ctx -> IO(Q.Action), ~cleanup: J.Json -> X.Ctx -> IO(Q.Action),
+  +ctx: X.Ctx, +api: C.Api, +o: J.Json, s: F.FState) -> IO(Q.Action):
+  match s:
+    case F.FApply{}:
+      apply(o, ctx)
+    case F.FAdd{p}:
+      IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Q.Action,
+        Cl.Client.patch(X.Ctx.cfg(ctx), api, C.Obj.name(o), C.PJson{}, p), Fin.added)
+    case F.FCleanup{p}:
+      IO.bind(Q.Action, Q.Action, cleanup(o, ctx),
+        a => Fin.cleaned(X.Ctx.cfg(ctx), api, C.Obj.name(o), p, a))
+    case F.FDone{}:
+      IO.pure(Q.Action, Q.AwaitChange{})
+
+# Finalizer.run for Kube.control: apply and cleanup get the reconcile
+# context (config, caches, failure count). Adding the finalizer changes
+# metadata.finalizers, which every predicate passes, so the reconcile that
+# follows sees it even under X.PGeneration.
+def Finalizer.control(~apply: J.Json -> X.Ctx -> IO(Q.Action),
+  ~cleanup: J.Json -> X.Ctx -> IO(Q.Action), +ctx: X.Ctx, +api: C.Api, name: String,
+  +o: J.Json) -> IO(Q.Action):
+  Fin.ctl.go(~apply, ~cleanup, ctx, api, o, F.Fin.state(o, name))
 
 # Events
 # ------
@@ -101,7 +127,7 @@ def Event.body(+o: J.Json, +r: C.Res, warn: Bool, reason: String, action: String
       J.KV{"namespace", J.JStr{Event.ns(C.Obj.namespace(o))}}])},
     J.KV{"eventTime", J.JStr{now}}, J.KV{"reportingController", J.JStr{controller}},
     J.KV{"reportingInstance", J.JStr{controller}}, J.KV{"action", J.JStr{action}},
-    J.KV{"reason", J.JStr{reason}}, J.KV{"type", J.JStr{Event.kind(warn)}}, J.KV{"note", J.JStr{note}},
+    J.KV{"reason", J.JStr{reason}}, J.KV{"type", J.JStr{Event.kind(warn)}}, J.KV{"note", J.JStr{String.take(note, 1024n)}},
     J.KV{"regarding", Event.regarding(o, r)}])
 
 def Event.sent(r: Result<&2, &2, Cl.KErr, J.Json>) -> IO(Unit):

@@ -57,6 +57,28 @@ def KErr.code(e: KErr) -> U32:
     case _:
       0
 
+def KErr.reason(e: KErr) -> String:
+  match e:
+    case KApi{C.Status{c, r, m}}:
+      r
+    case _:
+      ""
+
+# A write lost to a newer resourceVersion (409 Conflict): read again and
+# retry (client-go's retry.RetryOnConflict case).
+def KErr.is_conflict(+e: KErr) -> Bool:
+  Bool.and(U32.is_eq(KErr.code(e), 409), Bool.not(String.eq(KErr.reason(e), "AlreadyExists")))
+
+def KErr.is_not_found(+e: KErr) -> Bool:
+  U32.is_eq(KErr.code(e), 404)
+
+def KErr.is_already_exists(+e: KErr) -> Bool:
+  Bool.and(U32.is_eq(KErr.code(e), 409), String.eq(KErr.reason(e), "AlreadyExists"))
+
+# The server is shedding load (429): back off before retrying.
+def KErr.is_throttled(+e: KErr) -> Bool:
+  U32.is_eq(KErr.code(e), 429)
+
 # Files
 # -----
 
@@ -511,27 +533,38 @@ def Limit.fill(n: Nat, +ch: Chan(Unit)) -> IO(Unit):
       IO.bind(Poll<&1, &1, Result<&1, &1, Unit, Unit>, Unit>, Unit, Chan.try_send(Unit, ch, Unit{}, 0),
         p => Limit.fill(k, ch))
 
-def Limit.refill(fuel: Nat, +ch: Chan(Unit), +every: U32, +per: Nat) -> IO(Unit):
-  match fuel:
-    case 0n:
-      IO.pure(Unit, Unit{})
-    case 1n+f:
+# A tick of every ms earns qps * every / 1000 tokens; the remainder (in
+# thousandths of a token) carries to the next tick, so the rate is exact.
+# A tick adds at most burst tokens: the rest would find the bucket full.
+def Limit.tick(+qps: U32, +every: U32, +burst: U32, +carry: U32) -> Nat:
+  U32.to_nat(U32.min(((carry + qps * every) / 1000 : U32), burst))
+
+def Limit.carry(+qps: U32, +every: U32, +carry: U32) -> U32:
+  ((carry + qps * every) % 1000 : U32)
+
+def Limit.refill(outer: Nat, fuel: Nat, +ch: Chan(Unit), +qps: U32, +every: U32, +burst: U32,
+  +carry: U32) -> IO(Unit):
+  match outer fuel:
+    case 0n 0n:
+      IO.die(Unit, 1, "bend-kube: rate limiter out of steps")
+    case 1n+o 0n:
+      Limit.refill(o, 4294967295n, ch, qps, every, burst, carry)
+    case o 1n+f:
       IO.bind(Unit, Unit, IO.sleep(every),
-        u => IO.bind(Unit, Unit, Limit.fill(per, ch), u2 => Limit.refill(f, ch, every, per)))
+        u => IO.bind(Unit, Unit, Limit.fill(Limit.tick(qps, every, burst, carry), ch),
+          u2 => Limit.refill(o, f, ch, qps, every, burst, Limit.carry(qps, every, carry))))
 
-# Ticks of at least 1ms, each adding enough tokens to make qps a second.
+# Ticks of 10ms, or longer for slow rates (one token a tick), at most 1s.
 def Limit.every(+qps: U32) -> U32:
-  U32.max((1000 / qps : U32), 1)
-
-def Limit.per(+qps: U32, +every: U32) -> Nat:
-  U32.to_nat(U32.max((qps * every / 1000 : U32), 1))
+  U32.min(U32.max((1000 / qps : U32), 10), 1000)
 
 # A full bucket of burst tokens, refilled at qps a second (qps above 0).
 def Limit.start(+qps: U32, +burst: U32) -> IO(Chan(Unit)):
   IO.bind(Chan(Unit), Chan(Unit), Chan.new(Unit, U32.max(burst, 1)),
     +ch => IO.bind(Unit, Chan(Unit), Limit.fill(U32.to_nat(U32.max(burst, 1)), ch),
       u => IO.bind(Unit, Chan(Unit),
-        IO.spawn(Unit, Limit.refill(4294967295n, ch, Limit.every(qps), Limit.per(qps, Limit.every(qps)))),
+        IO.spawn(Unit, Limit.refill(4294967295n, 4294967295n, ch, qps, Limit.every(qps),
+          U32.max(burst, 1), 0)),
         u2 => IO.pure(Chan(Unit), ch))))
 
 def Client.send.gate(+cfg: K.Config, req: H.Req, m: Maybe<&2, Chan(Unit)>) ->
@@ -603,6 +636,17 @@ def Client.replace(+cfg: K.Config, a: C.Api, name: String, obj: J.Json) ->
 
 def Client.delete(+cfg: K.Config, a: C.Api, name: String) -> IO(Result<&2, &2, KErr, J.Json>):
   Client.json(cfg, C.Req.delete(a, name))
+
+# A delete with options: propagation, grace period, preconditions.
+def Client.delete_with(+cfg: K.Config, a: C.Api, name: String, o: C.DeleteOpts) ->
+  IO(Result<&2, &2, KErr, J.Json>):
+  Client.json(cfg, C.Req.delete_with(a, name, o))
+
+# Replaces the status subresource (a PUT carrying the object's
+# resourceVersion, so a stale write fails with 409).
+def Client.replace_status(+cfg: K.Config, a: C.Api, name: String, obj: J.Json) ->
+  IO(Result<&2, &2, KErr, J.Json>):
+  Client.json(cfg, C.Req.replace_status(a, name, obj))
 
 def Client.patch(+cfg: K.Config, a: C.Api, name: String, p: C.PatchKind, body: J.Json) ->
   IO(Result<&2, &2, KErr, J.Json>):

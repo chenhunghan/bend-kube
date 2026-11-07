@@ -204,6 +204,52 @@ def Req.replace(a: Api, name: String, obj: J.Json) -> H.Req:
 def Req.delete(a: Api, name: String) -> H.Req:
   H.Req{"DELETE", Api.item(a, name), Req.json_headers(), ""}
 
+# How a delete proceeds (metav1.DeleteOptions): the propagation policy
+# ("Background", "Foreground", "Orphan"; "" for the server's default), a
+# grace period in seconds (None for the default), and preconditions on the
+# object's uid and resourceVersion ("" for none), so a controller deletes
+# only the object it saw.
+type DeleteOpts is Data:
+  DeleteOpts{propagation: String, grace: Maybe<&2, U32>, uid: String, rv: String}
+
+def DeleteOpts.default() -> DeleteOpts:
+  DeleteOpts{"", None{}, "", ""}
+
+def DeleteOpts.str.go(+k: String, +v: String, rest: List<&2, J.KV>, empty: Bool) -> List<&2, J.KV>:
+  match empty:
+    case True{}:
+      rest
+    case False{}:
+      J.KV{k, J.JStr{v}} <> rest
+
+def DeleteOpts.str(+k: String, +v: String, rest: List<&2, J.KV>) -> List<&2, J.KV>:
+  DeleteOpts.str.go(k, v, rest, String.is_empty(v))
+
+def DeleteOpts.grace(g: Maybe<&2, U32>, rest: List<&2, J.KV>) -> List<&2, J.KV>:
+  match g:
+    case Some{n}:
+      J.KV{"gracePeriodSeconds", J.Json.u32(n)} <> rest
+    case None{}:
+      rest
+
+def DeleteOpts.pre(fs: List<&2, J.KV>, rest: List<&2, J.KV>) -> List<&2, J.KV>:
+  match fs:
+    case Nil{}:
+      rest
+    case xs:
+      J.KV{"preconditions", J.Json.obj(xs)} <> rest
+
+def DeleteOpts.json(o: DeleteOpts) -> J.Json:
+  match o:
+    case DeleteOpts{p, g, u, r}:
+      J.Json.obj(J.KV{"apiVersion", J.JStr{"v1"}} <> J.KV{"kind", J.JStr{"DeleteOptions"}}
+        <> DeleteOpts.str("propagationPolicy", p, DeleteOpts.grace(g,
+          DeleteOpts.pre(DeleteOpts.str("uid", u, DeleteOpts.str("resourceVersion", r, Nil{})), Nil{}))))
+
+def Req.delete_with(a: Api, name: String, o: DeleteOpts) -> H.Req:
+  H.Req{"DELETE", Api.item(a, name), Req.body_headers("application/json"),
+    J.Json.show(DeleteOpts.json(o))}
+
 def PatchKind.content_type(p: PatchKind) -> String:
   match p:
     case PMerge{}:
@@ -340,6 +386,16 @@ def Res.kind(r: Res) -> String:
   match r:
     case Res{g, v, k, p, n}:
       k
+
+def Res.group(r: Res) -> String:
+  match r:
+    case Res{g, v, k, p, n}:
+      g
+
+def Res.namespaced(r: Res) -> Bool:
+  match r:
+    case Res{g, v, k, p, n}:
+      n
 
 # An owner reference to o, for objects a controller creates.
 def Obj.owner_ref(+o: J.Json, +res: Res) -> J.Json:

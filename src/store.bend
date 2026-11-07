@@ -89,3 +89,24 @@ def Store.values(s: Store) -> List<&2, J.Json>:
   match s:
     case Store{+o, b, r}:
       Store.values.go(Map.keys(&2, J.Json, o), o)
+
+def Store.dropped.put(+k: String, r: Map<&2, J.Json> & Bool, rest: List<&2, String>) -> List<&2, String>:
+  match r:
+    case (m, True{}):
+      rest
+    case (m, False{}):
+      k <> rest
+
+def Store.dropped.go(ks: List<&2, String>, +buf: Map<&2, J.Json>) -> List<&2, String>:
+  match ks:
+    case Nil{}:
+      Nil{}
+    case Con{+k, t}:
+      Store.dropped.put(k, Map.has(&2, J.Json, buf, k), Store.dropped.go(t, buf))
+
+# The keys a relist drops: cached now, absent from the buffer InitDone is
+# about to swap in (objects deleted while the watch was down).
+def Store.dropped(s: Store) -> List<&2, String>:
+  match s:
+    case Store{+o, +b, r}:
+      Store.dropped.go(Map.keys(&2, J.Json, o), b)

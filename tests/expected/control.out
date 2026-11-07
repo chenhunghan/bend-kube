@@ -1,6 +1,7 @@
 first list: keys: web/a web/b; gone: -
 status write, spec change, deletion, delete: keys: web/b web/a; gone: web/b
 unchanged relist: keys: -; gone: -
+relist without b (deleted while down): keys: -; gone: web/b
 no predicates: keys: web/a; gone: -
 owned: keys: web/a; gone: -
 owner moved, then deleted: keys: web/a web/b web/b web/b; gone: -
@@ -15,3 +16,7 @@ ctx children of a: a-db a-web
 ctx children of b: b-web
 ctx cache 2 (none): -
 ctx find web/a-db: a-db
+related relist drops a-db and b-web: keys: web/a web/a web/b web/a; gone: -
+owned by a cluster-scoped Tenant: keys: t1; gone: -
+children of a, controller owners only: a-web
+fails in ctx: 4

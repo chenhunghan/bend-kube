@@ -23,6 +23,11 @@ rules:
   - apiGroups: ["bend-kube.dev"]
     resources: ["websites/status"]
     verbs: ["patch"]
+  # owner references with blockOwnerDeletion need this where the
+  # OwnerReferencesPermissionEnforcement admission plugin runs (OpenShift)
+  - apiGroups: ["bend-kube.dev"]
+    resources: ["websites/finalizers"]
+    verbs: ["update"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "patch"]
@@ -82,7 +87,7 @@ spec:
       labels: {app: bend-kube-website}
     spec:
       serviceAccountName: bend-kube-website
-      terminationGracePeriodSeconds: 15
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

@@ -167,3 +167,18 @@ def Laws.fold_delete_forgets(ps, x, s, ks, g):
 
 def Laws.owner_triggers_owner(prim):
   {==}
+
+def Laws.owner_triggers_cluster_owner(prim):
+  {==}
+
+def Laws.owner_needs_group(prim):
+  {==}
+
+def Laws.filter_finalizer_passes(r1, r2, a, b, f):
+  {==}
+
+def Laws.cond_same_status_keeps_time(r1, m1, t0, r2, m2, g, now):
+  {==}
+
+def Laws.cond_new_status_moves_time(r1, m1, t0, r2, m2, now):
+  {==}

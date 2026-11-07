@@ -18,10 +18,15 @@ import Base
 #   key's generation, and an add (or a newer timer) bumps it, so a stale
 #   timer wakes to nothing.
 
+# Requeue: run again after ms. AwaitChange: run on the next change.
+# Retry: failed; run again after the key's backoff. RetryIn: failed; run
+# again after ms (an error that knows its delay, such as a 429's
+# Retry-After). Both failures count toward the key's backoff and Ctx.fails.
 type Action is Data:
   Requeue{ms: U32}
   AwaitChange{}
   Retry{msg: String}
+  RetryIn{msg: String, ms: U32}
 
 type Queue is Data:
   Queue{front: List<&2, String>, back: List<&2, String>, inq: Map<&2, U32>,
@@ -160,6 +165,8 @@ def Queue.done.fails(+fl: Map<&2, U32>, +key: String, a: Action) -> Map<&2, U32>
   match a:
     case Retry{m}:
       Mp.bump(fl, key)
+    case RetryIn{m, ms}:
+      Mp.bump(fl, key)
     case _:
       Mp.off(fl, key)
 
@@ -185,6 +192,8 @@ def Queue.done.timer(q: Queue, +key: String, a: Action, +fails: U32) -> Queue & 
       (q, Nil{})
     case Retry{m}:
       Queue.arm(q, key, Queue.backoff(fails))
+    case RetryIn{m, ms}:
+      Queue.arm(q, key, ms)
 
 def Queue.done.run(q: Queue, +key: String, +a: Action) -> Queue & List<&2, Timer>:
   match q:
@@ -266,3 +275,9 @@ def Queue.depth(q: Queue) -> U32:
   match q:
     case Queue{f, b, i, r, d, g, fl, n, mx}:
       U32.from_nat(Map.size(&2, U32, i))
+
+# How many times in a row key has failed.
+def Queue.fails(q: Queue, key: String) -> U32:
+  match q:
+    case Queue{f, b, i, r, d, g, fl, n, mx}:
+      Mp.get(fl, key)

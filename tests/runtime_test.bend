@@ -1,0 +1,120 @@
+import Base
+import ../src/json.bend as J
+import ../src/core.bend as C
+import ../src/http.bend as H
+import ../src/watcher.bend as W
+import ../src/store.bend as S
+import ../src/queue.bend as Q
+import ../src/control.bend as X
+import ../src/runtime.bend as R
+
+# Scenarios through the controller loop's pure steps: dispatch past keys
+# whose objects are gone, one pending wake per key however often it is
+# requeued, a stale sleeper that does nothing, and how a watch stream's
+# end is read.
+
+def cm(name: String) -> J.Json:
+  J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{name}},
+    J.KV{"namespace", J.JStr{"ns"}}, J.KV{"resourceVersion", J.JStr{"1"}}])}])
+
+def spec(+max: U32) -> X.Spec:
+  X.Spec.max(X.Spec.of(C.Api{C.Res.config_maps(), C.InNs{"ns"}}), max)
+
+def state(+max: U32) -> R.CState:
+  R.CState{S.Store.new(), Nil{}, Q.Queue.new(max), R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}},
+    None{}, R.Tim.new()}
+
+def st(r: R.CState & List<&2, Q.Timer>) -> R.CState:
+  match r:
+    case (s, ts):
+      s
+
+def msg(s: R.CState, +m: R.Msg, +now: U32, +max: U32) -> R.CState & List<&2, R.Sleep>:
+  R.Ctl.plan(R.Ctl.on_msg(R.Ctl.at(s, now), m, spec(max)))
+
+def planned(r: R.CState & List<&2, R.Sleep>) -> R.CState:
+  match r:
+    case (s, ss):
+      s
+
+def sleeps.go(ss: List<&2, R.Sleep>) -> String:
+  match ss:
+    case Nil{}:
+      "none"
+    case Con{R.Sleep{k, due, ms}, Nil{}}:
+      k ++ " at " ++ U32.show(due)
+    case Con{R.Sleep{k, due, ms}, t}:
+      k ++ " at " ++ U32.show(due) ++ ", " ++ sleeps.go(t)
+
+def sleeps(r: R.CState & List<&2, R.Sleep>) -> String:
+  match r:
+    case (s, ss):
+      sleeps.go(ss)
+
+def jobs.go(js: List<&2, R.Job>) -> String:
+  match js:
+    case Nil{}:
+      "none"
+    case Con{R.Job{k, o, f}, Nil{}}:
+      k
+    case Con{R.Job{k, o, f}, t}:
+      k ++ " " ++ jobs.go(t)
+
+def jobs(r: R.CState & List<&2, R.Job>) -> String:
+  match r:
+    case (s, js):
+      jobs.go(js)
+
+def dispatched(r: R.CState & List<&2, R.Job>) -> R.CState:
+  match r:
+    case (s, js):
+      s
+
+def end.of(i: W.Input) -> String:
+  match i:
+    case W.IWatchEnd{}:
+      "resume at once"
+    case W.IWatchErr{c}:
+      "back off"
+    case _:
+      "?"
+
+def end(r: H.Resp) -> String:
+  end.of(R.Drv.end_input(r))
+
+def store_of(s: R.CState) -> S.Store:
+  match s:
+    case R.CState{st, cs, q, x, p, t}:
+      st
+
+def with_queue(+s: S.Store) -> R.CState:
+  R.CState{s, Nil{}, Q.Queue.add_all(["ns/gone1", "ns/gone2", "ns/live"], Q.Queue.new(1)),
+    R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}}, None{}, R.Tim.new()}
+
+def main() -> IO(Unit):
+  # One slot. Three keys are queued; the first two are gone from the cache
+  # (their objects deleted), the third is live: dispatch must reach it.
+  +listed = planned(msg(state(1), R.MOuts{0, [W.OInit{}, W.OInitApply{cm("live")}, W.OInitDone{}]}, 1000, 1))
+  +gone = with_queue(store_of(listed))
+  # Requeues: a key asks for 60s, then 30s (earlier: a new wake), then 90s
+  # (later: keeps the 30s wake, takes the newer generation).
+  +run0 = dispatched(R.Ctl.dispatch(listed))
+  +s1 = planned(msg(run0, R.MDone{"ns/live", Q.Requeue{60000}, 5}, 1000, 1))
+  +run1 = dispatched(R.Ctl.dispatch(planned(msg(s1, R.MOuts{0, [W.OApply{cm("live")}]}, 2000, 1))))
+  +s2 = planned(msg(run1, R.MDone{"ns/live", Q.Requeue{30000}, 5}, 3000, 1))
+  +run2 = dispatched(R.Ctl.dispatch(planned(msg(s2, R.MOuts{0, [W.OApply{cm("live")}]}, 4000, 1))))
+  +s3 = planned(msg(run2, R.MDone{"ns/live", Q.Requeue{90000}, 5}, 5000, 1))
+  # The 61000 sleeper wakes: stale (the key's wake is 33000), so nothing
+  # runs; the 33000 one fires and the key runs.
+  +stale = st(R.Ctl.on_wake(s3, "ns/live", 61000))
+  +fired = st(R.Ctl.on_wake(s3, "ns/live", 33000))
+  do IO<Unit>:
+    IO.print("dispatch with gone keys ahead of a live one: " ++ jobs(R.Ctl.dispatch(gone)))
+    IO.print("requeue 60s at t=1000: sleeper " ++ sleeps(msg(run0, R.MDone{"ns/live", Q.Requeue{60000}, 5}, 1000, 1)))
+    IO.print("requeue 30s at t=3000: sleeper " ++ sleeps(msg(run1, R.MDone{"ns/live", Q.Requeue{30000}, 5}, 3000, 1)))
+    IO.print("requeue 90s at t=5000: sleeper " ++ sleeps(msg(run2, R.MDone{"ns/live", Q.Requeue{90000}, 5}, 5000, 1)))
+    IO.print("stale sleeper wakes: runs " ++ jobs(R.Ctl.dispatch(stale)))
+    IO.print("the key's own sleeper wakes: runs " ++ jobs(R.Ctl.dispatch(fired)))
+    IO.print("watch ends whole: " ++ end(H.Resp{H.PDone{}, None{}, Nil{}}))
+    IO.print("watch cut mid-stream: " ++ end(H.Resp{H.PErr{"connection closed mid-response"}, None{}, Nil{}}))
+    IO.print("watch closed before answering: " ++ end(H.Resp{H.PLost{"closed"}, None{}, Nil{}}))

@@ -32,7 +32,7 @@ def spec() -> X.Spec:
   X.Spec.filter(
     X.Spec.watches(
       X.Spec.watches_where(X.Spec.label(X.Spec.of(cms()), "bend-kube/bundle=true"), cms(),
-        "bend-kube/bundle-output=true", X.ROwner{}),
+        "bend-kube/bundle-output=true", "", X.ROwner{}),
       C.Api{C.Res.secrets(), C.InNs{ns()}}, X.RRef{["data", "secret"]}),
     [X.PGeneration{}])
 

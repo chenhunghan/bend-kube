@@ -20,6 +20,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # owner references with blockOwnerDeletion need this where the
+  # OwnerReferencesPermissionEnforcement admission plugin runs (OpenShift)
+  - apiGroups: [""]
+    resources: ["configmaps/finalizers"]
+    verbs: ["update"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]
@@ -57,7 +62,7 @@ spec:
     spec:
       serviceAccountName: bend-kube-mirror
       # SIGTERM releases the Lease; give it time to.
-      terminationGracePeriodSeconds: 15
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

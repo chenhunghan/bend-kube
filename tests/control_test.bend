@@ -40,7 +40,19 @@ def thing(name: String, ns: String, labels: String, owner: String) -> J.Json:
     ++ labels ++ "}, \"ownerReferences\": [" ++ owner ++ "]}}")
 
 def owner(+name: String) -> String:
-  "{\"kind\": \"Website\", \"name\": \"" ++ name ++ "\", \"uid\": \"uid-" ++ name ++ "\"}"
+  "{\"apiVersion\": \"bend-kube.dev/v1alpha1\", \"kind\": \"Website\", \"name\": \"" ++ name
+    ++ "\", \"uid\": \"uid-" ++ name ++ "\", \"controller\": true}"
+
+# An owner reference that is not the controller.
+def plain_owner(+name: String) -> String:
+  "{\"apiVersion\": \"bend-kube.dev/v1alpha1\", \"kind\": \"Website\", \"name\": \"" ++ name
+    ++ "\", \"uid\": \"uid-" ++ name ++ "\"}"
+
+def res() -> C.Res:
+  C.Res{"bend-kube.dev", "v1alpha1", "Website", "websites", True{}}
+
+def tenants() -> C.Res:
+  C.Res{"bend-kube.dev", "v1", "Tenant", "tenants", False{}}
 
 def keys(ks: List<&2, String>) -> String:
   match ks:
@@ -75,7 +87,7 @@ def gen() -> List<&2, X.Pred>:
 
 def ctx(+prim: S.Store, +rel: S.Store) -> X.Ctx:
   X.Ctx{K.Config{"h", 443, "", K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, "default", None{}, None{}},
-    3, prim, [rel]}
+    3, prim, [rel], 0}
 
 def main() -> IO(Unit):
   # The first list fills the cache: everything reconciles, filtered or not.
@@ -90,34 +102,48 @@ def main() -> IO(Unit):
     W.OApply{site("a", "1", "14", ", \"deletionTimestamp\": \"2026-11-07T00:00:00Z\"", "s1")},
     W.ODelete{site("b", "2", "15", "", "s2")}], X.Fold{prim, Nil{}, Nil{}})
   +quiet = X.Fold.prim(gen(), [W.OInit{}, W.OInitApply{site("a", "1", "10", "", "s1")},
+    W.OInitApply{site("b", "1", "11", "", "s2")}, W.OInitDone{}], X.Fold{prim, Nil{}, Nil{}})
+  +dropped = X.Fold.prim(gen(), [W.OInit{}, W.OInitApply{site("a", "1", "10", "", "s1")},
     W.OInitDone{}], X.Fold{prim, Nil{}, Nil{}})
   +all = X.Fold.prim(Nil{}, [W.OApply{site("a", "1", "12", "", "s1")}],
     X.Fold{prim, Nil{}, Nil{}})
   # Related objects: owned (old and new owners both reconcile), referenced
   # by a field (a string, or a list holding it), named by a label, and
   # every primary in a namespace.
-  +owned0 = X.Fold.rel(X.ROwner{}, "Website", [W.OApply{thing("a-web", "web", "", owner("a"))}], prim,
+  +owned0 = X.Fold.rel(X.ROwner{}, res(), [W.OApply{thing("a-web", "web", "", owner("a"))}], prim,
     X.Fold{S.Store.new(), Nil{}, Nil{}})
-  +owned1 = X.Fold.rel(X.ROwner{}, "Website", [W.OApply{thing("a-web", "web", "", owner("b"))},
+  +owned1 = X.Fold.rel(X.ROwner{}, res(), [W.OApply{thing("a-web", "web", "", owner("b"))},
     W.ODelete{thing("a-web", "web", "", owner("b"))}], prim, X.Fold{fold_store(owned0), Nil{}, Nil{}})
-  +refd = X.Fold.rel(X.RRef{["spec", "secretName"]}, "Website", [W.OApply{thing("s2", "web", "", "")},
+  +refd = X.Fold.rel(X.RRef{["spec", "secretName"]}, res(), [W.OApply{thing("s2", "web", "", "")},
     W.OApply{thing("s2", "other", "", "")}], prim, X.Fold{S.Store.new(), Nil{}, Nil{}})
-  +listed_ref = X.Fold.rel(X.RRef{["spec", "hosts"]}, "Website", [W.OApply{thing("s1", "web", "", "")}],
+  +listed_ref = X.Fold.rel(X.RRef{["spec", "hosts"]}, res(), [W.OApply{thing("s1", "web", "", "")}],
     prim, X.Fold{S.Store.new(), Nil{}, Nil{}})
-  +labeled = X.Fold.rel(X.RLabel{"site"}, "Website", [W.OApply{thing("cm", "web", "\"site\": \"b\"", "")},
+  +labeled = X.Fold.rel(X.RLabel{"site"}, res(), [W.OApply{thing("cm", "web", "\"site\": \"b\"", "")},
     W.OApply{thing("cm2", "web", "\"other\": \"b\"", "")}], prim, X.Fold{S.Store.new(), Nil{}, Nil{}})
-  +fan = X.Fold.rel(X.RAll{}, "Website", [W.OApply{thing("cfg", "web", "", "")},
+  +fan = X.Fold.rel(X.RAll{}, res(), [W.OApply{thing("cfg", "web", "", "")},
     W.OApply{thing("cfg", "elsewhere", "", "")}, W.OApply{thing("node", "", "", "")}], prim,
     X.Fold{S.Store.new(), Nil{}, Nil{}})
-  +rel = fold_store(X.Fold.rel(X.ROwner{}, "Website", [W.OInit{},
+  +rel = fold_store(X.Fold.rel(X.ROwner{}, res(), [W.OInit{},
     W.OInitApply{thing("a-web", "web", "", owner("a"))}, W.OInitApply{thing("a-db", "web", "", owner("a"))},
     W.OInitApply{thing("b-web", "web", "", owner("b"))}, W.OInitDone{}], prim,
     X.Fold{S.Store.new(), Nil{}, Nil{}}))
   +c = ctx(prim, rel)
+  +rel_dropped = X.Fold.rel(X.ROwner{}, res(), [W.OInit{},
+    W.OInitApply{thing("a-web", "web", "", owner("a"))}, W.OInitDone{}], prim,
+    X.Fold{rel, Nil{}, Nil{}})
+  +cluster = X.Fold.rel(X.ROwner{}, tenants(), [W.OApply{thing("quota", "team-a", "",
+    "{\"apiVersion\": \"bend-kube.dev/v1\", \"kind\": \"Tenant\", \"name\": \"t1\"}")}],
+    S.Store.new(), X.Fold{S.Store.new(), Nil{}, Nil{}})
+  +rel2 = fold_store(X.Fold.rel(X.ROwner{}, res(), [W.OInit{},
+    W.OInitApply{thing("a-web", "web", "", owner("a"))},
+    W.OInitApply{thing("a-extra", "web", "", plain_owner("a"))}, W.OInitDone{}], prim,
+    X.Fold{S.Store.new(), Nil{}, Nil{}}))
+  +c2 = ctx(prim, rel2)
   do IO<Unit>:
     IO.print("first list: " ++ fold_keys(listed))
     IO.print("status write, spec change, deletion, delete: " ++ fold_keys(later))
     IO.print("unchanged relist: " ++ fold_keys(quiet))
+    IO.print("relist without b (deleted while down): " ++ fold_keys(dropped))
     IO.print("no predicates: " ++ fold_keys(all))
     IO.print("owned: " ++ fold_keys(owned0))
     IO.print("owner moved, then deleted: " ++ fold_keys(owned1))
@@ -132,3 +158,7 @@ def main() -> IO(Unit):
     IO.print("ctx children of b: " ++ names(X.Ctx.children(c, 1, site("b", "1", "11", "", "s2"))))
     IO.print("ctx cache 2 (none): " ++ names(X.Ctx.all(c, 2)))
     IO.print("ctx find web/a-db: " ++ names(opt(X.Ctx.find(c, 1, "web/a-db"))))
+    IO.print("related relist drops a-db and b-web: " ++ fold_keys(rel_dropped))
+    IO.print("owned by a cluster-scoped Tenant: " ++ fold_keys(cluster))
+    IO.print("children of a, controller owners only: " ++ names(X.Ctx.children(c2, 1, site("a", "1", "10", "", "s1"))))
+    IO.print("fails in ctx: " ++ U32.show(X.Ctx.fails(X.Ctx.with_fails(c, 4))))

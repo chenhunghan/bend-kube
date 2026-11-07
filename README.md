@@ -95,7 +95,12 @@ laws can range over all of the controller's logic.
   on a watch event, a watch request or a continue token, relists from
   scratch at once.
 - Other failures back off exponentially (800ms doubling to 30s, plus up to
-  50% jitter); success resets it.
+  50% jitter); success resets it. A watch stream that is cut off, or that
+  ends without a whole response, counts as a failure. Only the server's
+  orderly end resumes at once, so a flapping server or load balancer isn't
+  hammered.
+- Failures are logged with their reason: the API status, or the network
+  error.
 - `resourceVersion` is opaque: it is copied and never compared.
 
 **Caching:** a relist builds a fresh buffer between Init and InitDone and
@@ -108,8 +113,11 @@ controller-runtime users apply by hand).
 `X.Spec.of(api)` names the primary, and
 `Kube.control(~rec, spec, opts)` runs it with `rec(obj, ctx)`:
 
-- `X.Spec.owns(s, api)` watches objects the primary owns; an event on one
-  (deletions included) queues its owners of the primary's kind.
+- `X.Spec.owns(s, api)` watches objects the primary owns. An event on one
+  (deletions included) queues the owners it names that have the primary's
+  kind and API group.
+  - A namespaced primary is looked up in the child's namespace.
+  - A cluster-scoped primary is looked up by name alone.
 - `X.Spec.watches(s, api, rel)` watches any related kind, mapped to
   primaries by a relation. The relation is applied to the object as cached
   before the change and as it is after, so if the link moves, the old
@@ -120,30 +128,57 @@ controller-runtime users apply by hand).
     names the object. An example is a Secret named in `spec.secretName`.
   - `X.RAll{}`: every primary in the object's namespace.
 
-  `X.Spec.watches_where` adds a label selector.
+  When a related watch relists, objects that vanished while it was down
+  reconcile the primaries they mapped to. `X.Spec.watches_where(s, api,
+  label, field, rel)` adds label and field selectors.
 - `X.Spec.filter(s, preds)` (kube-runtime's `predicate_filter`): a primary
   change reconciles only when one of these differs from the cached object:
   `X.PGeneration{}` (the spec), `X.PLabels{}`, `X.PAnnotations{}` or
   `X.PFinalizers{}`. So with `[X.PGeneration{}]`, a controller's own status
   writes don't wake it.
   - An object the cache hasn't seen always passes.
-  - A deletion that starts always passes, so a finalizer is never missed.
+  - A deletion that starts always passes, and so does a change of
+    finalizers. A controller that adds its finalizer and waits is therefore
+    woken by the change.
   - An object without a generation (a ConfigMap) passes on every change.
   - An unchanged relist is quiet.
 
   Requeues and retries are not filtered.
-- `X.Spec.label` sets the primary's label selector, and `X.Spec.max` sets
-  how many reconciles run at once (default 8).
-- **Reconcile context:** `ctx` gives the client config (`X.Ctx.cfg`), the
-  controller's index (`X.Ctx.idx`), and read-only snapshots of every cache.
-  These include the primary's (`X.Ctx.get`, `X.Ctx.list`) and each related
-  watch's, numbered from 1 in the order added (`X.Ctx.find`, `X.Ctx.all`,
-  `X.Ctx.children(ctx, n, owner)` by owner uid). Reads from the cache
-  aren't requests to the API server.
+- `X.Spec.label` and `X.Spec.field` set the primary's selectors.
+  `X.Spec.max` sets how many reconciles run at once (default 8, at least 1).
+- `X.Spec.timeout(s, ms)` treats a reconcile still running after ms as
+  failed: it is retried with backoff and its key and slot are freed. The
+  late run is not cancelled, so it must stay idempotent. The default is no
+  limit, because each limit holds a sleeping timer.
+- **Reconcile context:** `ctx` gives:
+  - the client config (`X.Ctx.cfg`) and the controller's index
+    (`X.Ctx.idx`);
+  - how many times in a row this key has failed (`X.Ctx.fails`), so a
+    reconcile can escalate or give up;
+  - read-only snapshots of every cache: the primary's (`X.Ctx.get`,
+    `X.Ctx.list`), and each related watch's, numbered from 1 in the order
+    added (`X.Ctx.find`, `X.Ctx.all`). `X.Ctx.children(ctx, n, owner)`
+    returns the objects the owner controls (`controller: true`, by uid).
+
+  Reads from the cache aren't requests to the API server.
 - No reconcile starts until every cache has listed. `/readyz` waits for all
   of them.
-- A reconcile that answers `Retry{msg}` is logged as a warning with its key
-  and message.
+- **Errors:** a reconcile answers `Retry{msg}` to back off, or
+  `RetryIn{msg, ms}` when it knows the delay (a 429's `Retry-After`). Both
+  are logged as warnings with the key and count as errors. `Cl.KErr` has
+  `is_conflict`, `is_not_found`, `is_already_exists` and `is_throttled`.
+- **Status:** `src/cond.bend` keeps `status.conditions` as
+  apimachinery's `meta.SetStatusCondition` does. `Cond.set` replaces a
+  condition by type, and `lastTransitionTime` changes only when the status
+  does. `Cond.get`, `Cond.is_true` and `Cond.patch` help write them with
+  `Client.patch_status`. `Client.replace_status` puts the whole status.
+- **Finalizers:** `Finalizer.control(~apply, ~cleanup, ctx, api, name, obj)`
+  is kube-runtime's `finalizer()`, with callbacks that get the context.
+- **Deletes:** `Client.delete_with(cfg, api, name, C.DeleteOpts{..})` sets
+  propagation (`Background`, `Foreground`, `Orphan`), a grace period, and
+  uid or resourceVersion preconditions.
+- `Kube.control_with(~rec, cfg, specs, opts)` runs controllers against a
+  given config: another cluster, or a test server.
 
 `Kube.run(~rec, primary, owned, opts)` remains, with `rec(obj, cfg)`; it is
 `Kube.control` with owned watches and no predicates.
@@ -157,7 +192,14 @@ controller-runtime users apply by hand).
   concurrently.
 - Errors back off per key, from 5ms doubling to at most 1000s.
 - A delayed requeue is staled by any newer add.
-- Deleted keys are forgotten.
+- A key has at most one pending wake, the earliest asked for, with one
+  sleeper (kube-runtime's scheduler). Requeues never pile up timers.
+  Delays of a second or more get up to 10% jitter, so requeues armed
+  together spread out.
+- When a key leaves the queue and its object is gone, its bookkeeping is
+  forgotten. That covers objects deleted while their key ran or waited, and
+  objects a relist dropped.
+- A key whose object is gone frees its slot for the keys behind it.
 - Nothing is reconciled until the first list completes.
 
 **Many controllers, shared watches** (controller-runtime's Manager,
@@ -182,18 +224,29 @@ deadline):
 
 - Expiry is judged by this process's own clock, by when it last saw the
   record change. Remote timestamps are never compared.
+- Each Lease read and write is bounded by what is left of the renew
+  deadline. Lateness is judged by the clock after the calls return, so a
+  hung write cannot keep a stale leader running.
+- Lease calls bypass the client rate limit, so a burst of reconciles
+  cannot delay a renewal.
 - Lease writes go through `resourceVersion`, so of two contenders only one
   write lands.
 - A leader that cannot renew within the deadline exits with status 1, so
   two leaders never act at once.
 - SIGTERM drains (see Shutdown), then releases the Lease and exits with
-  status 0, so failover takes milliseconds after the drain.
+  status 0, so failover takes milliseconds after the drain. The release
+  reads the Lease afresh and retries if a renewal raced it (a 409), up to
+  three times within 4s, and logs the outcome.
+- `Opts.with_lease(o, E.LOpts{..})` sets the Lease duration, renew deadline
+  and retry period.
 
 **Shutdown:** on SIGTERM or SIGINT, with or without leader election, every
 controller stops starting reconciles. The process waits for the running
-ones, up to `Opts.with_grace` (default 25s, inside Kubernetes' default 30s
-termination grace period), then exits with status 0. A standby replica
-exits at once.
+ones, up to `Opts.with_grace`, then exits with status 0.
+- The default grace is 20s; with up to 4s to release the Lease, that fits
+  Kubernetes' default 30s termination grace period.
+- A replica whose controllers never started (a standby) exits at once.
+- A second signal exits at once, with status 1.
 
 **Client rate limit** (client-go's token bucket): every request except a
 watch takes a token from a bucket of `burst` tokens, refilled at `qps` a
@@ -285,15 +338,21 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
 **Operations:**
 
 - Logs are one JSON object per line on stderr.
-- `/healthz`, `/readyz` (503 until every cache is synced; `standby` on a
-  replica that isn't the leader) and `/metrics` are served on `:8080`
-  (`Opts.with_port`, 0 for none).
+- `/healthz`, `/readyz` and `/metrics` are served on `:8080`
+  (`Opts.with_port`, 0 for none). `/readyz` answers:
+  - 503 until every cache is synced;
+  - `standby` on a replica that isn't the leader;
+  - 503 if the status keeper does not answer within 2s.
+- Each controller publishes its status at most once a second, and whenever
+  its readiness changes.
 - Metrics: `bendkube_reconcile_total`, `bendkube_reconcile_errors_total`,
   `bendkube_reconcile_duration_seconds` (a histogram with Prometheus'
   default buckets), `bendkube_watch_events_total`,
   `bendkube_reconcile_running`, `bendkube_queue_depth`,
   `bendkube_store_objects`, `bendkube_store_ready` and `bendkube_leader`.
-  Counters are 32-bit and wrap; Prometheus reads a wrap as a reset.
+  Counters are 32-bit and wrap; Prometheus reads a wrap as a reset. The
+  duration sum is kept in seconds and lasts 136 years. A duration made
+  absurd by the wall clock stepping back counts as 0.
 - Events go to `events.k8s.io/v1` (`Event.publish`).
 
 **Parallelism:** the watch lines that arrive in one read are separate JSON
@@ -304,7 +363,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 42 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 47 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -340,7 +399,13 @@ loop.
   - an object without a generation reconciles on every change;
   - an applied primary is cached and queued; a deleted one leaves the
     cache, queues nothing and is forgotten;
-  - an owned object queues the owner it names, in its namespace.
+  - an owned object queues the owner it names of the primary's kind and
+    API group, in its namespace;
+  - a cluster-scoped owner is queued by name;
+  - an owner of the same kind in another group queues nothing;
+  - under any predicate, a change of finalizers reconciles.
+- **Conditions:** setting a condition with an unchanged status keeps its
+  `lastTransitionTime`; a new status moves it.
 - **HTTP:** a connection that ends before any response byte is *lost*
   (safe to retry); one that ends mid-response is *broken* (never retried).
 - **Proxies:**
@@ -407,8 +472,8 @@ Publishing needs the `BENDAI_KEY` repository secret: the `key` field of
 - `examples/guard.bend` runs a finalizer and records Events on ConfigMaps
   selected by a label.
 - `examples/noop.bend` is a scale baseline:
-  - 20,020 ConfigMaps (586 bytes each as JSON) are listed, cached and
-    reconciled in 5.7s, and the process then holds 204 MB RSS;
+  - 20,018 ConfigMaps (586 bytes each as JSON) are listed, cached and
+    reconciled in 2.6s, and the process then holds 204 MB RSS;
   - a further 2,000 updates are reconciled within 5s, and memory stays
     flat (208 MB).
 - `examples/website.bend` is a typed operator: a generated `Website` CRD
@@ -456,7 +521,7 @@ in-cluster:
   - the typed Website operator, both from a laptop and in-cluster, and on
     the JS lane;
   - two controllers sharing one watch;
-  - the 20,020-object sync;
+  - the 20,018-object sync in 2.6s;
   - a Secret change reconciling the bundles that reference it, read from
     the cache;
   - the Website operator settling after Ready: no reconciles from its own
@@ -476,6 +541,17 @@ in-cluster:
   for each related event, and `X.Ctx.children` looks through a related
   cache. That is linear in the cache's size, which is fine for thousands of
   objects.
+
+- **Webhooks.** There is no HTTPS server, so no admission or conversion
+  webhooks.
+  - Validate with CRD schemas, CEL rules (`x-kubernetes-validations`) and
+    `ValidatingAdmissionPolicy`.
+  - Terminate TLS in a sidecar if a webhook is needed.
+- **Watch shaping.** Predicates apply to the primary only; related watches
+  trigger on every change. Relations are the four kinds above; there is no
+  arbitrary mapper function.
+- **Resync.** There is no periodic resync of every object. A reconcile asks
+  for its next look with `Requeue{ms}`.
 
 These are choices, matching kube-rs's defaults:
 

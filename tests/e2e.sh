@@ -63,6 +63,8 @@ EOF
 for _ in $(seq 1 60); do [ "$(k get website hello -o jsonpath='{.status.phase}' 2>/dev/null)" = Ready ] && break; sleep 2; done
 [ "$(k get website hello -o jsonpath='{.status.phase}')" = Ready ] && pass "website becomes Ready" || fail "website not Ready"
 [ "$(k get deploy hello -o jsonpath='{.metadata.ownerReferences[0].kind}')" = Website ] && pass "deployment owned" || fail "deployment not owned"
+[ "$(k get website hello -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" = True ] \
+  && pass "Ready condition set" || fail "Ready condition"
 k patch website hello --type merge -p '{"spec":{"replicas":2}}' >/dev/null
 for _ in $(seq 1 60); do [ "$(k get website hello -o jsonpath='{.status.readyReplicas}')" = 2 ] && break; sleep 2; done
 [ "$(k get website hello -o jsonpath='{.status.readyReplicas}')" = 2 ] && pass "scale follows spec" || fail "scale"

@@ -58,22 +58,26 @@ def Serve.path.go(parts: List<&2, String>) -> String:
 def Serve.path(req: String) -> String:
   Serve.path.go(String.split(String.trim(Serve.first_line(req)), ' '))
 
-def Serve.probe.answer(m: Poll<&1, &1, Maybe<&1, List<&2, R.Snap>>, Unit>) -> List<&2, R.Snap>:
+def Serve.probe.answer(m: Poll<&1, &1, Maybe<&1, List<&2, R.Snap>>, Unit>) ->
+  Maybe<&2, List<&2, R.Snap>>:
   match m:
     case Ready{Some{x}}:
-      x
+      Some{x}
     case _:
-      Nil{}
+      None{}
 
-# Every controller's snapshot from the status keeper, which answers at once
-# (none on a standby replica).
-def Serve.probe(+status: Chan(R.SMsg)) -> IO(List<&2, R.Snap>):
-  IO.bind(Chan(List<&2, R.Snap>), List<&2, R.Snap>, Chan.new(List<&2, R.Snap>, 1),
-    +c => IO.bind(Result<&1, &1, R.SMsg, Unit>, List<&2, R.Snap>,
-      Chan.send(R.SMsg, status, R.SGet{c}),
-      u => IO.bind(Poll<&1, &1, Maybe<&1, List<&2, R.Snap>>, Unit>, List<&2, R.Snap>,
-        Chan.try_recv(List<&2, R.Snap>, c, 500),
-        m => IO.pure(List<&2, R.Snap>, Serve.probe.answer(m)))))
+# Every controller's snapshot from the status keeper (none on a standby
+# replica), or None if the keeper did not answer within 2s.
+def Serve.probe(+status: Chan(R.SMsg)) -> IO(Maybe<&2, List<&2, R.Snap>>):
+  IO.bind(Chan(List<&2, R.Snap>), Maybe<&2, List<&2, R.Snap>>, Chan.new(List<&2, R.Snap>, 1),
+    +c => IO.bind(Poll<&1, &1, Result<&1, &1, R.SMsg, Unit>, R.SMsg>, Maybe<&2, List<&2, R.Snap>>,
+      Chan.try_send(R.SMsg, status, R.SGet{c}, 1000),
+      u => IO.bind(Poll<&1, &1, Maybe<&1, List<&2, R.Snap>>, Unit>, Maybe<&2, List<&2, R.Snap>>,
+        Chan.try_recv(List<&2, R.Snap>, c, 2000),
+        m => IO.pure(Maybe<&2, List<&2, R.Snap>>, Serve.probe.answer(m)))))
+
+def Serve.unavailable() -> String:
+  Serve.reply(503, "text/plain", "status unavailable\n")
 
 def Serve.all_ready(ss: List<&2, R.Snap>) -> Bool:
   match ss:
@@ -144,8 +148,10 @@ def Serve.buckets(+name: String, +ctl: String, les: List<&2, String>, cs: List<&
 def Serve.pad3(+n: U32) -> String:
   String.drop(U32.show((n + 1000 : U32)), 1n)
 
-def Serve.secs(+ms: U32) -> String:
-  U32.show((ms / 1000 : U32)) ++ "." ++ Serve.pad3((ms % 1000 : U32))
+def Serve.secs(x: R.Sum) -> String:
+  match x:
+    case R.Sum{s, +m}:
+      U32.show(s) ++ "." ++ Serve.pad3(m)
 
 def Serve.hist(ss: List<&2, R.Snap>, +name: String) -> String:
   match ss:
@@ -185,15 +191,26 @@ def Serve.text(+ss: List<&2, R.Snap>) -> String:
 def Serve.metrics(+ss: List<&2, R.Snap>) -> String:
   Serve.reply(200, "text/plain; version=0.0.4", Serve.text(ss))
 
+def Serve.or_unavailable(m: Maybe<&2, List<&2, R.Snap>>, metrics: Bool) -> String:
+  match m metrics:
+    case Some{+ss} True{}:
+      Serve.metrics(ss)
+    case Some{+ss} False{}:
+      Serve.ready(ss)
+    case None{} _:
+      Serve.unavailable()
+
 # The answer to a request.
 def Serve.route(path: String, +status: Chan(R.SMsg)) -> IO(String):
   match path:
     case "/healthz":
       IO.pure(String, Serve.reply(200, "text/plain", "ok\n"))
     case "/readyz":
-      IO.bind(List<&2, R.Snap>, String, Serve.probe(status), m => IO.pure(String, Serve.ready(m)))
+      IO.bind(Maybe<&2, List<&2, R.Snap>>, String, Serve.probe(status),
+        m => IO.pure(String, Serve.or_unavailable(m, False{})))
     case "/metrics":
-      IO.bind(List<&2, R.Snap>, String, Serve.probe(status), m => IO.pure(String, Serve.metrics(m)))
+      IO.bind(Maybe<&2, List<&2, R.Snap>>, String, Serve.probe(status),
+        m => IO.pure(String, Serve.or_unavailable(m, True{})))
     case _:
       IO.pure(String, Serve.reply(404, "text/plain", "not found\n"))
 

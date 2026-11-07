@@ -34,15 +34,22 @@ type Opts is Data:
     burst: U32}
 
 # 8 reconciles at once, health and metrics on :8080, no leader election, a
-# 25s grace period (inside Kubernetes' default 30s), and 50 requests a
-# second with bursts of 100.
+# 20s grace period (with up to 4s to hand the lease back, inside
+# Kubernetes' default 30s), and 50 requests a second with bursts of 100.
 def Opts.default() -> Opts:
-  Opts{8, 8080, None{}, "", 25000, 50, 100}
+  Opts{8, 8080, None{}, "", 20000, 50, 100}
 
 def Opts.with_leader(o: Opts, ns: String, name: String, id: String) -> Opts:
   match o:
     case Opts{m, p, l, s, g, q, b}:
       Opts{m, p, Some{E.LOpts.default(ns, name, id)}, s, g, q, b}
+
+# Leader election with every setting given (E.LOpts: namespace, name,
+# identity, lease seconds, renew deadline ms, retry ms).
+def Opts.with_lease(o: Opts, lo: E.LOpts) -> Opts:
+  match o:
+    case Opts{m, p, l, s, g, q, b}:
+      Opts{m, p, Some{lo}, s, g, q, b}
 
 def Opts.with_label(o: Opts, label: String) -> Opts:
   match o:
@@ -80,11 +87,13 @@ def Kube.serve.go(+port: U32, +status: Chan(R.SMsg), off: Bool) -> IO(Unit):
 def Kube.serve(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):
   Kube.serve.go(port, status, U32.is_eq(port, 0))
 
-# Without leader election: on SIGTERM or SIGINT, drain, then exit 0.
+# Without leader election: on SIGTERM or SIGINT, drain, then exit 0; a
+# second signal exits at once.
 def Kube.on_signal(drain: IO(Unit)) -> IO(Unit):
   IO.bind(U32, Unit, Y.Sys.signal(),
     sig => IO.bind(Unit, Unit, L.Log.info("terminating", [L.Log.kv("signal", U32.show(sig))]),
-      u => IO.bind(Unit, Unit, drain, u2 => IO.exit(0))))
+      u => IO.bind(Unit, Unit, IO.spawn(Unit, E.Leader.again()),
+        u1 => IO.bind(Unit, Unit, drain, u2 => IO.exit(0)))))
 
 def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Unit), work: IO(Unit)) -> IO(Unit):
   match l:
@@ -93,18 +102,21 @@ def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Unit), work: IO(
     case None{}:
       IO.bind(Unit, Unit, IO.spawn(Unit, Kube.on_signal(drain)), u => work)
 
-def Kube.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +specs: List<&2, X.Spec>,
-  o: Opts) -> IO(Unit):
+# cfg serves the controllers (rate-limited); ecfg serves leader election,
+# outside the rate limit, so a burst of reconciles never delays a renewal.
+def Kube.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +ecfg: K.Config,
+  +specs: List<&2, X.Spec>, o: Opts) -> IO(Unit):
   match o:
     case Opts{m, +p, l, sel, +grace, q, b}:
       IO.bind(List<&2, Chan(R.Msg)>, Unit, R.Manager.inboxes(List.length(&2, X.Spec, specs)),
         +chs => IO.bind(Chan(R.SMsg), Unit, R.Keeper.start(),
-          +status => IO.bind(Unit, Unit, Kube.serve(p, status),
-            u => IO.bind(Unit, Unit, L.Log.info("starting controllers",
-              [L.Log.kv("count", Nat.show(List.length(&2, X.Spec, specs))),
-                L.Log.kv("server", K.Config.host(cfg))]),
-              u2 => Kube.elect(cfg, l, R.Manager.stop(chs, status, grace),
-                R.Manager.start(~rec, cfg, specs, chs, status))))))
+          +status => IO.bind(Chan(Unit), Unit, R.Manager.started(),
+            +started => IO.bind(Unit, Unit, Kube.serve(p, status),
+              u => IO.bind(Unit, Unit, L.Log.info("starting controllers",
+                [L.Log.kv("count", Nat.show(List.length(&2, X.Spec, specs))),
+                  L.Log.kv("server", K.Config.host(cfg))]),
+                u2 => Kube.elect(ecfg, l, R.Manager.stop(chs, started, grace),
+                  R.Manager.start(~rec, cfg, specs, chs, status, started)))))))
 
 # Up to 8 idle keep-alive connections shared by every request.
 def Kube.pool() -> IO(Chan(Socket)):
@@ -123,13 +135,23 @@ def Kube.rate(o: Opts, +cfg: K.Config) -> IO(K.Config):
     case Opts{m, p, l, s, g, +q, b}:
       Kube.limited(cfg, q, b, U32.is_eq(q, 0))
 
+def Kube.pooled(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, specs: List<&2, X.Spec>,
+  +o: Opts) -> IO(Unit):
+  IO.bind(K.Config, Unit, Kube.rate(o, cfg), cfg2 => Kube.start(~rec, cfg2, cfg, specs, o))
+
+# Runs controllers against a given config (another cluster, a test
+# server); Kube.control_all infers it. The config gets a connection pool
+# and the rate limit.
+def Kube.control_with(~rec: J.Json -> X.Ctx -> IO(Q.Action), cfg: K.Config, specs: List<&2, X.Spec>,
+  +o: Opts) -> IO(Unit):
+  IO.bind(Chan(Socket), Unit, Kube.pool(),
+    p => Kube.pooled(~rec, K.Config.with_pool(cfg, p), specs, o))
+
 def Kube.configured(~rec: J.Json -> X.Ctx -> IO(Q.Action), c: Result<&2, &2, String, K.Config>,
   specs: List<&2, X.Spec>, +o: Opts) -> IO(Unit):
   match c:
     case Done{cfg}:
-      IO.bind(Chan(Socket), Unit, Kube.pool(),
-        p => IO.bind(K.Config, Unit, Kube.rate(o, K.Config.with_pool(cfg, p)),
-          cfg2 => Kube.start(~rec, cfg2, specs, o)))
+      Kube.control_with(~rec, cfg, specs, o)
     case Fail{e}:
       IO.die(Unit, 1, "bend-kube: no config: " ++ e)
 
