@@ -70,14 +70,17 @@ def Cond.make(t: String, status: String, reason: String, message: String, +gen: 
     J.KV{"lastTransitionTime", J.JStr{now}}, J.KV{"reason", J.JStr{reason}},
     J.KV{"message", J.JStr{message}}])
 
-# The new condition, keeping the old one's transition time when the status
-# is unchanged.
-def Cond.keep(+old: J.Json, +new: J.Json, same: Bool) -> J.Json:
-  match same:
+def Cond.keep.go(+old: J.Json, +new: J.Json, keep: Bool) -> J.Json:
+  match keep:
     case True{}:
       J.Json.set(new, "lastTransitionTime", J.Json.get(old, "lastTransitionTime"))
     case False{}:
       new
+
+# The new condition, keeping the old one's transition time when the status
+# is unchanged.
+def Cond.keep(+old: J.Json, +new: J.Json, same: Bool) -> J.Json:
+  Cond.keep.go(old, new, Bool.and(same, Bool.not(J.Json.is_null(J.Json.get(old, "lastTransitionTime")))))
 
 def Cond.set.put(+c: J.Json, +new: J.Json, hit: Bool, rest: List<&2, J.Json>, done: Bool) ->
   List<&2, J.Json> & Bool:

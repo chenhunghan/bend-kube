@@ -182,3 +182,27 @@ def Laws.cond_same_status_keeps_time(r1, m1, t0, r2, m2, g, now):
 
 def Laws.cond_new_status_moves_time(r1, m1, t0, r2, m2, now):
   {==}
+
+def Laws.lease_live_is_held():
+  {==}
+
+def Laws.lease_clock_step_is_held():
+  {==}
+
+def Laws.lease_expired_is_taken():
+  {==}
+
+def Laws.lease_ours_renews(at, now):
+  {==}
+
+def Laws.lease_released_is_free(at, now):
+  {==}
+
+def Laws.fin_failed_cleanup_keeps(m):
+  {==}
+
+def Laws.fin_held_cleanup_keeps(ms):
+  {==}
+
+def Laws.fin_done_cleanup_releases():
+  {==}

@@ -27,6 +27,9 @@ def opt(m: Maybe<&2, J.Json>) -> List<&2, J.Json>:
     case None{}:
       Nil{}
 
+def gen() -> List<&2, X.Pred>:
+  [X.PGeneration{}]
+
 # A primary Website: name, generation, version, deletion stamp, and the
 # secret its spec names.
 def site(+name: String, gen: String, rv: String, del: String, +secret: String) -> J.Json:
@@ -34,14 +37,14 @@ def site(+name: String, gen: String, rv: String, del: String, +secret: String) -
     ++ "\", \"generation\": " ++ gen ++ ", \"resourceVersion\": \"" ++ rv ++ "\"" ++ del
     ++ "}, \"spec\": {\"secretName\": \"" ++ secret ++ "\", \"hosts\": [\"" ++ secret ++ "\", \"b\"]}}")
 
+def owner(+name: String) -> String:
+  "{\"apiVersion\": \"bend-kube.dev/v1alpha1\", \"kind\": \"Website\", \"name\": \"" ++ name
+    ++ "\", \"uid\": \"uid-" ++ name ++ "\", \"controller\": true}"
+
 # A related object: kind, name, namespace, labels, owner.
 def thing(name: String, ns: String, labels: String, owner: String) -> J.Json:
   js("{\"metadata\": {\"name\": \"" ++ name ++ "\", \"namespace\": \"" ++ ns ++ "\", \"labels\": {"
     ++ labels ++ "}, \"ownerReferences\": [" ++ owner ++ "]}}")
-
-def owner(+name: String) -> String:
-  "{\"apiVersion\": \"bend-kube.dev/v1alpha1\", \"kind\": \"Website\", \"name\": \"" ++ name
-    ++ "\", \"uid\": \"uid-" ++ name ++ "\", \"controller\": true}"
 
 # An owner reference that is not the controller.
 def plain_owner(+name: String) -> String:
@@ -82,8 +85,10 @@ def names(xs: List<&2, J.Json>) -> String:
     case Con{+x, t}:
       C.Obj.name(x) ++ " " ++ names(t)
 
-def gen() -> List<&2, X.Pred>:
-  [X.PGeneration{}]
+def fold_obj(f: X.Fold) -> J.Json:
+  match f:
+    case X.Fold{s, ks, g}:
+      Maybe.default(&2, J.Json, S.Store.get(s, "web/s"), J.JNull{})
 
 def ctx(+prim: S.Store, +rel: S.Store) -> X.Ctx:
   X.Ctx{K.Config{"h", 443, "", K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, "default", None{}, None{}},
@@ -161,4 +166,7 @@ def main() -> IO(Unit):
     IO.print("related relist drops a-db and b-web: " ++ fold_keys(rel_dropped))
     IO.print("owned by a cluster-scoped Tenant: " ++ fold_keys(cluster))
     IO.print("children of a, controller owners only: " ++ names(X.Ctx.children(c2, 1, site("a", "1", "10", "", "s1"))))
+    IO.print("a Secret with its data dropped: " ++ J.Json.show(fold_obj(X.Fold.rel(X.RAll{}, res(),
+      X.Out.trim_all(["data", "stringData"], [W.OApply{js("{\"metadata\": {\"name\": \"s\", \"namespace\": \"web\"}, \"type\": \"Opaque\", \"data\": {\"k\": \"dg==\"}}")}]),
+      prim, X.Fold{S.Store.new(), Nil{}, Nil{}}))))
     IO.print("fails in ctx: " ++ U32.show(X.Ctx.fails(X.Ctx.with_fails(c, 4))))

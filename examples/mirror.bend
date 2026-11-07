@@ -49,16 +49,10 @@ def reconcile.of(+o: J.Json, cfg: K.Config) -> IO(Q.Action):
 def reconcile(o: J.Json, cfg: K.Config) -> IO(Q.Action):
   reconcile.of(o, cfg)
 
-def opts(id: String) -> Kb.Opts:
-  Kb.Opts.with_leader(Kb.Opts.default(), "bend-demo", "bend-kube-mirror", id)
+# Leader election, identified as this pod (Opts.with_election: HOSTNAME
+# and a random suffix).
+def opts() -> Kb.Opts:
+  Kb.Opts.with_election(Kb.Opts.default(), "bend-demo", "bend-kube-mirror")
 
-def main.id(r: Result<&1, &1, U32 & String, String>) -> IO(Unit):
-  match r:
-    case Done{id}:
-      Kb.Kube.run(~reconcile, api(), [api()], opts(id))
-    case Fail{e}:
-      Kb.Kube.run(~reconcile, api(), [api()], opts("bend-kube-mirror"))
-
-# The leader identity is the pod's name (HOSTNAME in a pod).
 def main() -> IO(Unit):
-  IO.bind(Result<&1, &1, U32 & String, String>, Unit, IO.get_env("HOSTNAME"), main.id)
+  Kb.Kube.run(~reconcile, api(), [api()], opts())

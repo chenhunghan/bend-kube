@@ -11,7 +11,8 @@ import ./core.bend as C
 # - No Lease: create one naming us.
 # - A Lease held by someone else whose record we saw change less than
 #   leaseDuration ago (by our own clock: remote timestamps are never
-#   compared, so clock skew cannot steal a lease): wait.
+#   compared, so clock skew cannot steal a lease; our clock stepping back
+#   counts as no time passing, so a step cannot either): wait.
 # - Otherwise (ours, unheld, or expired): write it naming us, through the
 #   resourceVersion the read returned, so of two contenders only one
 #   write lands (optimistic concurrency).
@@ -57,10 +58,36 @@ def Lease.fresh(ns: String, name: String, id: String, +dur: U32, +now: String) -
     J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{name}}, J.KV{"namespace", J.JStr{ns}}])},
     J.KV{"spec", Lease.new_spec(id, dur, now, now, 0)}])
 
-def Lease.observe.go(h: String, r: String, o: Obs, +now: U32, same: Bool) -> Obs:
+def Lease.elapsed.go(+d: U32, back: Bool) -> U32:
+  match back:
+    case True{}:
+      0
+    case False{}:
+      d
+
+# Time since an observation, by our clock: a clock that stepped back (now
+# before at, by the wrapped difference) counts as no time at all, so a
+# clock step can never make a live lease look expired.
+def Lease.elapsed(+now: U32, +at: U32) -> U32:
+  Lease.elapsed.go((now - at : U32), U32.is_ge((now - at : U32), 2147483648))
+
+def Lease.observe.same(o: Obs, +now: U32, back: Bool) -> Obs:
+  match o back:
+    case Obs{h, r, at} True{}:
+      # the clock stepped back: count from now
+      Obs{h, r, now}
+    case x False{}:
+      x
+
+def Obs.at(o: Obs) -> U32:
+  match o:
+    case Obs{h, r, at}:
+      at
+
+def Lease.observe.go(h: String, r: String, +o: Obs, +now: U32, same: Bool) -> Obs:
   match same:
     case True{}:
-      o
+      Lease.observe.same(o, now, U32.is_ge((now - Obs.at(o) : U32), 2147483648))
     case False{}:
       Obs{h, r, now}
 
@@ -78,7 +105,7 @@ def Lease.held(+l: J.Json, +me: String, o: Obs, +now: U32, +dur: U32) -> Bool:
     case Obs{h, r, +at}:
       Bool.and(Bool.not(String.is_empty(Lease.holder(l))),
         Bool.and(Bool.not(String.eq(Lease.holder(l), me)),
-          U32.is_lt((now - at : U32), (dur * 1000 : U32))))
+          U32.is_lt(Lease.elapsed(now, at), (dur * 1000 : U32))))
 
 def Lease.take.go(+l: J.Json, me: String, +dur: U32, +now: String, ours: Bool) -> J.Json:
   match ours:

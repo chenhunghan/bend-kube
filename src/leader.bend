@@ -28,6 +28,11 @@ def LOpts.api(o: LOpts) -> C.Api:
     case LOpts{ns, n, i, d, dl, r}:
       C.Api{C.Res.leases(), C.InNs{ns}}
 
+def LOpts.id(o: LOpts) -> String:
+  match o:
+    case LOpts{ns, n, i, d, dl, r}:
+      i
+
 def LOpts.name(o: LOpts) -> String:
   match o:
     case LOpts{ns, n, i, d, dl, r}:
@@ -131,55 +136,57 @@ def Leader.lost() -> IO(Unit):
   IO.bind(Unit, Unit, L.Log.error("leader lease lost; exiting", Nil{}), u => IO.exit(1))
 
 # The election loop. start runs once, when the lease is first ours.
-def Leader.run(fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: E.Obs, +leading: Bool,
+def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: E.Obs, +leading: Bool,
   +last: U32, start: Maybe<&1, IO(Unit)>) -> IO(Unit):
-  match fuel ev:
-    case 0n e:
-      IO.pure(Unit, Unit{})
-    case 1n+f LTry{}:
+  match outer fuel ev:
+    case 0n 0n e:
+      IO.bind(Unit, Unit, L.Log.error("leader election out of steps; exiting", Nil{}), u => IO.exit(1))
+    case 1n+oc 0n e:
+      Leader.run(oc, 4294967295n, e, cfg, o, obs, leading, last, start)
+    case oc 1n+f LTry{}:
       IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
-        w => Leader.run(f, LAt{T.Wall.of(w)}, cfg, o, obs, leading, last, start))
-    case 1n+f LAt{+w}:
+        w => Leader.run(oc, f, LAt{T.Wall.of(w)}, cfg, o, obs, leading, last, start))
+    case oc 1n+f LAt{+w}:
       IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
         Leader.timed(Leader.room(T.Wall.ms(w), last, LOpts.deadline(o), leading),
           Cl.Client.get(cfg, LOpts.api(o), LOpts.name(o))),
-        r => Leader.run(f, LRead{w, r}, cfg, o, obs, leading, last, start))
-    case 1n+f LRead{+w, r}:
-      Leader.run(f, LDecided{T.Wall.ms(w), Leader.decide(Leader.read(r), o, obs, w)}, cfg, o, obs,
+        r => Leader.run(oc, f, LRead{w, r}, cfg, o, obs, leading, last, start))
+    case oc 1n+f LRead{+w, r}:
+      Leader.run(oc, f, LDecided{T.Wall.ms(w), Leader.decide(Leader.read(r), o, obs, w)}, cfg, o, obs,
         leading, last, start)
-    case 1n+f LDecided{+now, Done{E.Decision{E.LCreate{l}, ob}}}:
+    case oc 1n+f LDecided{+now, Done{E.Decision{E.LCreate{l}, ob}}}:
       IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
         w1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
           Leader.timed(Leader.room(Leader.ms(w1), last, LOpts.deadline(o), leading),
             Cl.Client.create(cfg, LOpts.api(o), l)),
-          r => Leader.run(f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
-    case 1n+f LDecided{+now, Done{E.Decision{E.LUpdate{l}, ob}}}:
+          r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
+    case oc 1n+f LDecided{+now, Done{E.Decision{E.LUpdate{l}, ob}}}:
       IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
         w1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
           Leader.timed(Leader.room(Leader.ms(w1), last, LOpts.deadline(o), leading),
             Cl.Client.replace(cfg, LOpts.api(o), LOpts.name(o), l)),
-          r => Leader.run(f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
-    case 1n+f LDecided{+now, Done{E.Decision{E.LWait{}, ob}}}:
-      Leader.run(f, LCheck{now, False{}}, cfg, o, ob, leading, last, start)
-    case 1n+f LDecided{+now, Fail{e}}:
+          r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
+    case oc 1n+f LDecided{+now, Done{E.Decision{E.LWait{}, ob}}}:
+      Leader.run(oc, f, LCheck{now, False{}}, cfg, o, ob, leading, last, start)
+    case oc 1n+f LDecided{+now, Fail{e}}:
       IO.bind(Unit, Unit, L.Log.warn("lease read failed", [L.Log.kv("error", Cl.KErr.show(e))]),
-        u => Leader.run(f, LCheck{now, False{}}, cfg, o, obs, leading, last, start))
-    case 1n+f LCheck{+now, ok}:
+        u => Leader.run(oc, f, LCheck{now, False{}}, cfg, o, obs, leading, last, start))
+    case oc 1n+f LCheck{+now, ok}:
       # lateness by the clock after the calls, not before them
       IO.bind(U32 & (U32 & U32), Unit, Y.Sys.wall(),
-        w2 => Leader.run(f, LWrote{now, ok, Leader.late(Leader.ms(w2), last, LOpts.deadline(o))},
+        w2 => Leader.run(oc, f, LWrote{now, ok, Leader.late(Leader.ms(w2), last, LOpts.deadline(o))},
           cfg, o, obs, leading, last, start))
-    case 1n+f LWrote{now, True{}, late}:
+    case oc 1n+f LWrote{now, True{}, late}:
       IO.bind(Unit, Unit, Leader.started(leading, start),
         u => IO.bind(Unit, Unit, IO.sleep(LOpts.retry(o)),
-          u2 => Leader.run(f, LTry{}, cfg, o, obs, True{}, now, None{})))
-    case 1n+f LWrote{now, False{}, late}:
-      Leader.run(f, LFail{Bool.and(leading, late)}, cfg, o, obs, leading, last, start)
-    case 1n+f LFail{True{}}:
+          u2 => Leader.run(oc, f, LTry{}, cfg, o, obs, True{}, now, None{})))
+    case oc 1n+f LWrote{now, False{}, late}:
+      Leader.run(oc, f, LFail{Bool.and(leading, late)}, cfg, o, obs, leading, last, start)
+    case oc 1n+f LFail{True{}}:
       Leader.lost()
-    case 1n+f LFail{False{}}:
+    case oc 1n+f LFail{False{}}:
       IO.bind(Unit, Unit, IO.sleep(LOpts.retry(o)),
-        u => Leader.run(f, LTry{}, cfg, o, obs, leading, last, start))
+        u => Leader.run(oc, f, LTry{}, cfg, o, obs, leading, last, start))
 
 def Leader.release.said(r: Result<&2, &2, Cl.KErr, J.Json>) -> IO(Bool):
   match r:
@@ -205,8 +212,10 @@ def Leader.release.got(r: Result<&2, &2, Cl.KErr, J.Json>, +cfg: K.Config, +o: L
     case Done{+l} LOpts{ns, n, +id, d, dl, rt}:
       Leader.release.mine(cfg, LOpts{ns, n, id, d, dl, rt}, E.Lease.release(l, T.Wall.micro(w)),
         String.eq(E.Lease.holder(l), id))
-    case _ _:
-      IO.pure(Bool, True{})
+    case Fail{+e} x:
+      # the read failed: try again
+      IO.bind(Unit, Bool, L.Log.warn("lease release read failed", [L.Log.kv("error", Cl.KErr.show(e))]),
+        u => IO.pure(Bool, False{}))
 
 def Leader.release.once(+cfg: K.Config, +o: LOpts) -> IO(Bool):
   IO.bind(U32 & (U32 & U32), Bool, Y.Sys.wall(),
@@ -220,11 +229,18 @@ def Leader.release.again(n: Nat, +cfg: K.Config, +o: LOpts, done: Bool) -> IO(Un
     case _ _:
       IO.pure(Unit, Unit{})
 
+def Leader.release.timed(m: Maybe<&1, Unit>) -> IO(Unit):
+  match m:
+    case Some{u}:
+      IO.pure(Unit, Unit{})
+    case None{}:
+      L.Log.warn("lease release timed out; the standby takes over when it expires", Nil{})
+
 # Hands the lease back, reading it afresh and trying again if a renewal
 # raced the write (a 409), up to three times, within 4s in all.
 def Leader.release(+cfg: K.Config, +o: LOpts) -> IO(Unit):
   IO.bind(Maybe<&1, Unit>, Unit, IO.within(Unit, 4000, Leader.release.again(3n, cfg, o, False{})),
-    m => IO.pure(Unit, Unit{}))
+    Leader.release.timed)
 
 # A second SIGTERM or SIGINT while draining exits at once.
 def Leader.again() -> IO(Unit):
@@ -243,4 +259,4 @@ def Leader.on_signal(+cfg: K.Config, +o: LOpts, drain: IO(Unit)) -> IO(Unit):
 # on SIGTERM before the lease is handed back.
 def Leader.elect(+cfg: K.Config, +o: LOpts, drain: IO(Unit), work: IO(Unit)) -> IO(Unit):
   IO.bind(Unit, Unit, IO.spawn(Unit, Leader.on_signal(cfg, o, drain)),
-    u => Leader.run(4294967295n, LTry{}, cfg, o, E.Obs.none(), False{}, 0, Some{work}))
+    u => Leader.run(4294967295n, 4294967295n, LTry{}, cfg, o, E.Obs.none(), False{}, 0, Some{work}))

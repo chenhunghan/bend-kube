@@ -343,7 +343,7 @@ def Fold.rel(+r: Rel, +res: C.Res, outs: List<&2, W.Out>, +prim: S.Store, f: Fol
 # A related watch: what to watch (and its label selector), and how its
 # objects map to primaries.
 type Sec is Data:
-  Sec{api: C.Api, label: String, field: String, rel: Rel}
+  Sec{api: C.Api, label: String, field: String, rel: Rel, drop: List<&2, String>}
 
 # A controller (kube-runtime's Controller::new(..).owns(..).watches(..)):
 # the primary with its label and field selectors, the predicates its
@@ -393,7 +393,7 @@ def Spec.timeout(s: Spec, ms: U32) -> Spec:
 def Spec.watches_where(s: Spec, a: C.Api, label: String, field: String, r: Rel) -> Spec:
   match s:
     case Spec{p, l, fs, ps, ss, m, to}:
-      Spec{p, l, fs, ps, List.append(&2, Sec, ss, [Sec{a, label, field, r}]), m, to}
+      Spec{p, l, fs, ps, List.append(&2, Sec, ss, [Sec{a, label, field, r, Nil{}}]), m, to}
 
 def Spec.watches(s: Spec, a: C.Api, r: Rel) -> Spec:
   Spec.watches_where(s, a, "", "", r)
@@ -448,8 +448,58 @@ def Spec.timeout_of(s: Spec) -> U32:
 
 def Sec.rel(s: Sec) -> Rel:
   match s:
-    case Sec{a, l, f, r}:
+    case Sec{a, l, f, r, d}:
       r
+
+def Sec.drop(s: Sec) -> List<&2, String>:
+  match s:
+    case Sec{a, l, f, r, d}:
+      d
+
+def Secs.set_last(ss: List<&2, Sec>, +d: List<&2, String>) -> List<&2, Sec>:
+  match ss:
+    case Nil{}:
+      Nil{}
+    case Con{Sec{a, l, f, r, x}, Nil{}}:
+      [Sec{a, l, f, r, d}]
+    case Con{x, t}:
+      x <> Secs.set_last(t, d)
+
+# Drops top-level fields (for example "data" and "stringData" of Secrets)
+# from the objects of the related watch added last, before they are
+# cached: a controller that only needs to know a referenced Secret changed
+# then holds no Secret's data. Reconcile reads what it needs with
+# Client.get.
+def Spec.drop(s: Spec, fields: List<&2, String>) -> Spec:
+  match s:
+    case Spec{p, l, fs, ps, ss, m, to}:
+      Spec{p, l, fs, ps, Secs.set_last(ss, fields), m, to}
+
+def Out.trim.obj(fs: List<&2, String>, +x: J.Json) -> J.Json:
+  match fs:
+    case Nil{}:
+      x
+    case Con{+f, t}:
+      Out.trim.obj(t, J.Json.del(x, f))
+
+def Out.trim(+fs: List<&2, String>, o: W.Out) -> W.Out:
+  match o:
+    case W.OApply{+x}:
+      W.OApply{Out.trim.obj(fs, x)}
+    case W.OInitApply{+x}:
+      W.OInitApply{Out.trim.obj(fs, x)}
+    case W.ODelete{+x}:
+      W.ODelete{Out.trim.obj(fs, x)}
+    case e:
+      e
+
+# A related watch's outputs with its dropped fields removed.
+def Out.trim_all(+fs: List<&2, String>, os: List<&2, W.Out>) -> List<&2, W.Out>:
+  match os:
+    case Nil{}:
+      Nil{}
+    case Con{o, t}:
+      Out.trim(fs, o) <> Out.trim_all(fs, t)
 
 # The reconcile context
 # ---------------------

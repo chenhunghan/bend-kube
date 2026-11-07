@@ -39,7 +39,7 @@ def spec() -> X.Spec:
 
 def main() -> IO(Unit):
   Kb.Kube.control(~reconcile, spec(),
-    Kb.Opts.with_leader(Kb.Opts.default(), "default", "my-controller", "replica-a"))
+    Kb.Opts.with_election(Kb.Opts.default(), "default", "my-controller"))
 ```
 <!-- x-release-please-end -->
 
@@ -131,6 +131,11 @@ controller-runtime users apply by hand).
   When a related watch relists, objects that vanished while it was down
   reconcile the primaries they mapped to. `X.Spec.watches_where(s, api,
   label, field, rel)` adds label and field selectors.
+
+  `X.Spec.drop(s, ["data", "stringData"])` keeps top-level fields of the
+  last related watch out of its cache. A controller that only needs to
+  know a referenced Secret changed then holds no Secret's data; it reads
+  what it needs with `Client.get`.
 - `X.Spec.filter(s, preds)` (kube-runtime's `predicate_filter`): a primary
   change reconciles only when one of these differs from the cached object:
   `X.PGeneration{}` (the spec), `X.PLabels{}`, `X.PAnnotations{}` or
@@ -164,8 +169,9 @@ controller-runtime users apply by hand).
 - No reconcile starts until every cache has listed. `/readyz` waits for all
   of them.
 - **Errors:** a reconcile answers `Retry{msg}` to back off, or
-  `RetryIn{msg, ms}` when it knows the delay (a 429's `Retry-After`). Both
-  are logged as warnings with the key and count as errors. `Cl.KErr` has
+  `RetryIn{msg, ms}` when it chooses the delay itself. Both are logged as
+  warnings with the key and count as errors. `Hold{ms}` means "not done
+  yet, look again after ms" and isn't an error. `Cl.KErr` has
   `is_conflict`, `is_not_found`, `is_already_exists` and `is_throttled`.
 - **Status:** `src/cond.bend` keeps `status.conditions` as
   apimachinery's `meta.SetStatusCondition` does. `Cond.set` replaces a
@@ -173,7 +179,14 @@ controller-runtime users apply by hand).
   does. `Cond.get`, `Cond.is_true` and `Cond.patch` help write them with
   `Client.patch_status`. `Client.replace_status` puts the whole status.
 - **Finalizers:** `Finalizer.control(~apply, ~cleanup, ctx, api, name, obj)`
-  is kube-runtime's `finalizer()`, with callbacks that get the context.
+  is kube-runtime's `finalizer()`, with callbacks that get the context. A
+  cleanup that answers `Retry`, `RetryIn` or `Hold` keeps the finalizer, so
+  a cleanup waiting on an external deletion holds the object without
+  counting errors. Any other answer removes it.
+- **Writes:** `Client.apply` forces conflicts, as a controller that owns
+  its fields wants. `Client.apply_with(.., force, ..)` doesn't force, so a
+  field another manager owns (an HPA's `spec.replicas`) fails with 409
+  instead of being taken over.
 - **Deletes:** `Client.delete_with(cfg, api, name, C.DeleteOpts{..})` sets
   propagation (`Background`, `Foreground`, `Orphan`), a grace period, and
   uid or resourceVersion preconditions.
@@ -237,8 +250,12 @@ deadline):
   status 0, so failover takes milliseconds after the drain. The release
   reads the Lease afresh and retries if a renewal raced it (a 409), up to
   three times within 4s, and logs the outcome.
-- `Opts.with_lease(o, E.LOpts{..})` sets the Lease duration, renew deadline
-  and retry period.
+- `Opts.with_election(o, ns, name)` names each replica by its pod
+  (`HOSTNAME`) plus a random suffix. Two replicas can't share an identity,
+  which would let both renew. `Opts.with_lease(o, E.LOpts{..})` sets the
+  identity, Lease duration, renew deadline and retry period by hand.
+- A step of the wall clock never makes a live Lease look expired: time
+  that runs backwards counts as none.
 
 **Shutdown:** on SIGTERM or SIGINT, with or without leader election, every
 controller stops starting reconciles. The process waits for the running
@@ -343,8 +360,12 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   - 503 until every cache is synced;
   - `standby` on a replica that isn't the leader;
   - 503 if the status keeper does not answer within 2s.
-- Each controller publishes its status at most once a second, and whenever
-  its readiness changes.
+- Each controller publishes its status at most once a second, whenever its
+  readiness changes, and one second after it goes idle with changes
+  unpublished.
+- A health port that can't be bound exits the process.
+- Events name the pod (`HOSTNAME`) as their reporting instance, and their
+  note is cut to the API's 1 kB.
 - Metrics: `bendkube_reconcile_total`, `bendkube_reconcile_errors_total`,
   `bendkube_reconcile_duration_seconds` (a histogram with Prometheus'
   default buckets), `bendkube_watch_events_total`,
@@ -363,7 +384,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 47 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 55 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -404,6 +425,13 @@ loop.
   - a cluster-scoped owner is queued by name;
   - an owner of the same kind in another group queues nothing;
   - under any predicate, a change of finalizers reconciles.
+- **Leader election:**
+  - another holder's Lease seen changing within its duration is live;
+  - our clock stepping back doesn't expire it;
+  - unchanged past its duration, it can be taken;
+  - our own Lease is renewed, and a released one is free.
+- **Finalizer cleanup:** a failed or held cleanup keeps the finalizer, and
+  a finished one releases it.
 - **Conditions:** setting a condition with an unchanged status keeps its
   `lastTransitionTime`; a new status moves it.
 - **HTTP:** a connection that ends before any response byte is *lost*
@@ -425,7 +453,7 @@ tools/ci.sh                      # laws, --verdict, module checks, tests, genera
 tests/run.sh                     # unit and scenario tests (UPDATE=1 rewrites expectations)
 tests/tls.sh                     # TLS and proxies against local servers, both lanes, sanitizers
 tests/package.sh                 # publish to a stand-in hub, build a controller from the package
-KUBECONFIG=test.yaml tests/e2e.sh   # proxy tunnel, typed operator, finalizer, shared watches, on a disposable cluster
+KUBECONFIG=test.yaml tests/e2e.sh   # on a disposable cluster: operator, finalizer, shared watches, cached reads, drain, rate limit
 ./y2j crd.yaml > crd.json && tools/gen.py crd crd.json -o gen/my.bend   # typed CRD views (--lib bend-kube-runtime@X.Y.Z.0/src outside this repo)
 cd examples && bend mirror.bend -o mirror && KUBECONFIG=~/.kube/config ./mirror
 docker build --build-arg EXAMPLE=mirror -t bend-kube-mirror .   # proof-gated image
@@ -449,7 +477,9 @@ kubectl apply -f deploy/mirror.yaml
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org)
 (`feat:`, `fix:`, `feat!:` …). `.github/workflows/ci.yml` runs
-`tools/ci.sh` on every pull request and push. On each push to `master`,
+`tools/ci.sh` on every pull request and push, and
+`.github/workflows/e2e.yml` runs `tests/e2e.sh` on a kind cluster for
+every pull request. On each push to `master`,
 `.github/workflows/release.yml` runs
 [release-please](https://github.com/googleapis/release-please), which keeps
 a release pull request up to date (version, `CHANGELOG.md`, the imports
@@ -496,7 +526,7 @@ Publishing needs the `BENDAI_KEY` repository secret: the `key` field of
 ## Verified on a live cluster
 
 All of this ran against k0s v1.36 (arm64), both from a laptop and
-in-cluster:
+in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
 
 - **Auth and config:**
   - TLS with client certificates, service-account tokens, and an exec
@@ -552,6 +582,15 @@ in-cluster:
   arbitrary mapper function.
 - **Resync.** There is no periodic resync of every object. A reconcile asks
   for its next look with `Requeue{ms}`.
+- **One cluster per process.** All controllers of a process share one
+  config. `Kube.control_with` picks which cluster.
+- **Plain HTTP.** The client speaks only TLS to the API server; it isn't a
+  general HTTP client for external systems.
+- **Typed patches.** Generated encoders omit absent fields, so a merge
+  patch can't clear one; send `null` by hand when a field must go.
+- **Requeue clock.** Pending wakes are compared by the wall clock. A
+  forward jump can make a shorter requeue wait for an earlier-armed one,
+  up to that one's deadline.
 
 These are choices, matching kube-rs's defaults:
 
@@ -595,5 +634,7 @@ Boundaries:
   null, booleans, and numbers (`-5`, `0.5`, `1e3`, written as JSON writes
   them; `0x1F` and `.inf` stay strings). It doesn't support complex keys
   (`? `) or anchors on inline `- key:` maps.
-- **Fuel.** Loops count down fuel of 4,294,967,295 steps so they terminate
-  by structure; at a few steps a second that is years.
+- **Fuel.** Long-running loops count down a nested fuel of 2^64 steps, so
+  they terminate by structure. At a million steps a second that is longer
+  than any process lives. A loop that ran out would exit the process
+  rather than sit idle.

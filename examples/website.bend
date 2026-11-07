@@ -164,7 +164,7 @@ def main.id(r: Result<&1, &1, U32 & String, String>) -> IO(Unit):
   match r:
     case Done{id}:
       Kb.Kube.control(~reconcile, spec(),
-        Kb.Opts.with_leader(Kb.Opts.default(), "bend-kube-system", "bend-kube-website", id))
+        Kb.Opts.with_election(Kb.Opts.default(), "bend-kube-system", "bend-kube-website"))
     case Fail{e}:
       # outside a pod (no HOSTNAME): run alone, without leader election
       Kb.Kube.control(~reconcile, spec(), Kb.Opts.default())

@@ -7,6 +7,7 @@ import ../src/store.bend as S
 import ../src/queue.bend as Q
 import ../src/control.bend as X
 import ../src/runtime.bend as R
+import ../src/client.bend as Cl
 
 # Scenarios through the controller loop's pure steps: dispatch past keys
 # whose objects are gone, one pending wake per key however often it is
@@ -91,6 +92,27 @@ def with_queue(+s: S.Store) -> R.CState:
   R.CState{s, Nil{}, Q.Queue.add_all(["ns/gone1", "ns/gone2", "ns/live"], Q.Queue.new(1)),
     R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}}, None{}, R.Tim.new()}
 
+def action(a: Q.Action) -> String:
+  match a:
+    case Q.Retry{m}:
+      "Retry " ++ m
+    case Q.Requeue{ms}:
+      "Requeue " ++ U32.show(ms)
+    case _:
+      "other"
+
+# Tokens the rate limiter adds over a second of ticks.
+def tokens.go(n: Nat, +qps: U32, +every: U32, +burst: U32, +carry: U32, +acc: U32) -> U32:
+  match n:
+    case 0n:
+      acc
+    case 1n+k:
+      tokens.go(k, qps, every, burst, Cl.Limit.carry(qps, every, carry),
+        (acc + U32.from_nat(Cl.Limit.tick(qps, every, burst, carry)) : U32))
+
+def tokens(+qps: U32, +burst: U32) -> String:
+  U32.show(tokens.go(U32.to_nat((1000 / Cl.Limit.every(qps) : U32)), qps, Cl.Limit.every(qps), burst, 0, 0))
+
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
   # (their objects deleted), the third is live: dispatch must reach it.
@@ -118,3 +140,8 @@ def main() -> IO(Unit):
     IO.print("watch ends whole: " ++ end(H.Resp{H.PDone{}, None{}, Nil{}}))
     IO.print("watch cut mid-stream: " ++ end(H.Resp{H.PErr{"connection closed mid-response"}, None{}, Nil{}}))
     IO.print("watch closed before answering: " ++ end(H.Resp{H.PLost{"closed"}, None{}, Nil{}}))
+    IO.print("reconcile finished in time: " ++ action(R.Ctl.timed_out(5000, Some{Q.Requeue{60000}})))
+    IO.print("reconcile timed out: " ++ action(R.Ctl.timed_out(5000, None{})))
+    IO.print("tokens in the first second (a fraction carries over) at qps 1, 3, 7, 50, 75, 333, 1000: " ++ tokens(1, 100) ++ " "
+      ++ tokens(3, 100) ++ " " ++ tokens(7, 100) ++ " " ++ tokens(50, 100) ++ " " ++ tokens(75, 100)
+      ++ " " ++ tokens(333, 100) ++ " " ++ tokens(1000, 100))

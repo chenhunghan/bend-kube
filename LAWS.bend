@@ -8,6 +8,7 @@ import ./src/finalizer.bend as F
 import ./src/http.bend as H
 import ./src/utf8.bend as U
 import ./src/proxy.bend as P
+import ./src/lease.bend as E
 import ./src/control.bend as X
 import ./src/cond.bend as Co
 
@@ -210,6 +211,20 @@ law fin_cleanup_tests:
   for name: String
   for i: U32
   {F.Fin.state.go(fs, name, Some{i}, True{}) == F.FCleanup{F.Fin.remove_patch(i, name)} : F.FState}
+
+# A cleanup that failed, or that holds (waiting on something outside),
+# keeps the finalizer, so the object is not deleted before cleanup is done.
+law fin_failed_cleanup_keeps:
+  for m: String
+  {F.Fin.keeps(Q.Retry{m}) == True{} : Bool}
+
+law fin_held_cleanup_keeps:
+  for ms: U32
+  {F.Fin.keeps(Q.Hold{ms}) == True{} : Bool}
+
+# A finished cleanup lets the finalizer go.
+law fin_done_cleanup_releases:
+  {F.Fin.keeps(Q.AwaitChange{}) == False{} : Bool}
 
 # HTTP (the keep-alive pool's retry rule)
 # ---------------------------------------
@@ -432,6 +447,39 @@ law filter_finalizer_passes:
     J.Json.set(Ex.obj(J.JNum{"3"}, r2, J.JNull{}, b), "metadata",
       J.Json.set(J.Json.get(Ex.obj(J.JNum{"3"}, r2, J.JNull{}, b), "metadata"), "finalizers",
         J.Json.arr([J.JStr{f}])))) == True{} : Bool}
+
+# Leader election (client-go's leaderelection)
+# --------------------------------------------
+
+# A Lease held by "a", as another replica reads it.
+def Ex.lease(+holder: String) -> J.Json:
+  J.Json.obj([J.KV{"spec", J.Json.obj([J.KV{"holderIdentity", J.JStr{holder}},
+    J.KV{"renewTime", J.JStr{"r"}}])}])
+
+# Another holder's lease, last seen changing 1s ago (15s duration), is live:
+# we wait.
+law lease_live_is_held:
+  {E.Lease.held(Ex.lease("a"), "b", E.Obs{"a", "r", 100000}, 101000, 15) == True{} : Bool}
+
+# Our clock stepping back 1s does not make it expire.
+law lease_clock_step_is_held:
+  {E.Lease.held(Ex.lease("a"), "b", E.Obs{"a", "r", 100000}, 99000, 15) == True{} : Bool}
+
+# Seen unchanged for longer than its duration, it has expired: we may take it.
+law lease_expired_is_taken:
+  {E.Lease.held(Ex.lease("a"), "b", E.Obs{"a", "r", 100000}, 115001, 15) == False{} : Bool}
+
+# Our own lease is never held against us: we renew it.
+law lease_ours_renews:
+  for at: U32
+  for now: U32
+  {E.Lease.held(Ex.lease("b"), "b", E.Obs{"b", "r", at}, now, 15) == False{} : Bool}
+
+# A released lease (no holder) is free at once.
+law lease_released_is_free:
+  for at: U32
+  for now: U32
+  {E.Lease.held(Ex.lease(""), "b", E.Obs{"", "r", at}, now, 15) == False{} : Bool}
 
 # Conditions (apimachinery's meta.SetStatusCondition)
 # ---------------------------------------------------

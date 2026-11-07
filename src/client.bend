@@ -223,7 +223,7 @@ def Conn.auth(+token: String) -> List<&2, H.Header>:
   Conn.auth.go(token, String.is_empty(token))
 
 def Conn.user_agent() -> String:
-  "bend-kube/0.1"
+  "bend-kube"
 
 def Conn.keep(keep: Bool) -> String:
   match keep:
@@ -661,6 +661,13 @@ def Client.patch_status(+cfg: K.Config, a: C.Api, name: String, p: C.PatchKind, 
 def Client.apply(+cfg: K.Config, a: C.Api, name: String, manager: String, body: J.Json) ->
   IO(Result<&2, &2, KErr, J.Json>):
   Client.patch(cfg, a, name, C.PApply{manager, True{}}, body)
+
+# Server-side apply that only forces when asked: without force, a field
+# another manager owns (an HPA's spec.replicas) fails with 409 Conflict
+# rather than being taken over.
+def Client.apply_with(+cfg: K.Config, a: C.Api, name: String, manager: String, force: Bool,
+  body: J.Json) -> IO(Result<&2, &2, KErr, J.Json>):
+  Client.patch(cfg, a, name, C.PApply{manager, force}, body)
 
 def Kc.rebased(r: Result<&2, &2, String, J.Json>, +path: String) -> Result<&2, &2, String, J.Json>:
   match r:

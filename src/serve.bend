@@ -252,22 +252,26 @@ def AEv.got(p: Listener & Serve.Res(Socket)) -> AEv:
       AGot{l, r}
 
 # Accepts forever (fuel permitting), serving each connection on its own.
-def Serve.loop(fuel: Nat, ev: AEv, +status: Chan(R.SMsg)) -> IO(Unit):
-  match fuel ev:
-    case 0n AGot{l, r}:
+def Serve.loop(outer: Nat, fuel: Nat, ev: AEv, +status: Chan(R.SMsg)) -> IO(Unit):
+  match outer fuel ev:
+    case 0n 0n AGot{l, r}:
       Listener.close(l)
-    case 1n+f AGot{l, r}:
+    case 1n+o 0n e:
+      Serve.loop(o, 4294967295n, e, status)
+    case o 1n+f AGot{l, r}:
       IO.bind(Unit, Unit, Serve.accepted(r, status),
         u => IO.bind(Listener & Serve.Res(Socket), Unit, TCP.accept(l),
-          p => Serve.loop(f, AEv.got(p), status)))
+          p => Serve.loop(o, f, AEv.got(p), status)))
 
 def Serve.listening(r: Serve.Res(Listener), +status: Chan(R.SMsg)) -> IO(Unit):
   match r:
     case Done{l}:
       IO.bind(Listener & Serve.Res(Socket), Unit, TCP.accept(l),
-        p => Serve.loop(4294967295n, AEv.got(p), status))
+        p => Serve.loop(4294967295n, 4294967295n, AEv.got(p), status))
     case Fail{(c, m)}:
-      IO.print_err("health server: " ++ m)
+      # probes and metrics are part of the contract with the kubelet: a
+      # port that cannot be bound is fatal (as in controller-runtime)
+      IO.die(Unit, 1, "bend-kube: health server cannot listen: " ++ m)
 
 # Serves the endpoints on 0.0.0.0:port.
 def Serve.run(+port: U32, +status: Chan(R.SMsg)) -> IO(Unit):

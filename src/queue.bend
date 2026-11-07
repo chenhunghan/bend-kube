@@ -19,6 +19,8 @@ import Base
 #   timer wakes to nothing.
 
 # Requeue: run again after ms. AwaitChange: run on the next change.
+# Hold: not done yet (waiting on something outside), run again after ms;
+# not a failure, and a finalizer cleanup that holds keeps its finalizer.
 # Retry: failed; run again after the key's backoff. RetryIn: failed; run
 # again after ms (an error that knows its delay, such as a 429's
 # Retry-After). Both failures count toward the key's backoff and Ctx.fails.
@@ -27,6 +29,7 @@ type Action is Data:
   AwaitChange{}
   Retry{msg: String}
   RetryIn{msg: String, ms: U32}
+  Hold{ms: U32}
 
 type Queue is Data:
   Queue{front: List<&2, String>, back: List<&2, String>, inq: Map<&2, U32>,
@@ -193,6 +196,8 @@ def Queue.done.timer(q: Queue, +key: String, a: Action, +fails: U32) -> Queue & 
     case Retry{m}:
       Queue.arm(q, key, Queue.backoff(fails))
     case RetryIn{m, ms}:
+      Queue.arm(q, key, ms)
+    case Hold{ms}:
       Queue.arm(q, key, ms)
 
 def Queue.done.run(q: Queue, +key: String, +a: Action) -> Queue & List<&2, Timer>:

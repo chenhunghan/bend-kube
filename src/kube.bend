@@ -44,6 +44,12 @@ def Opts.with_leader(o: Opts, ns: String, name: String, id: String) -> Opts:
     case Opts{m, p, l, s, g, q, b}:
       Opts{m, p, Some{E.LOpts.default(ns, name, id)}, s, g, q, b}
 
+# Leader election under a Lease in ns named name, identified as this
+# replica: its HOSTNAME (the pod name) and a random suffix, so two replicas
+# never share an identity. Prefer this to with_leader.
+def Opts.with_election(o: Opts, ns: String, name: String) -> Opts:
+  Opts.with_leader(o, ns, name, "")
+
 # Leader election with every setting given (E.LOpts: namespace, name,
 # identity, lease seconds, renew deadline ms, retry ms).
 def Opts.with_lease(o: Opts, lo: E.LOpts) -> Opts:
@@ -95,10 +101,37 @@ def Kube.on_signal(drain: IO(Unit)) -> IO(Unit):
       u => IO.bind(Unit, Unit, IO.spawn(Unit, E.Leader.again()),
         u1 => IO.bind(Unit, Unit, drain, u2 => IO.exit(0)))))
 
+def Kube.ident.of(h: Result<&1, &1, U32 & String, String>, r: Result<&1, &1, U32 & String, U32>) ->
+  String:
+  match h r:
+    case Done{host} Done{x}:
+      host ++ "_" ++ U32.show(x)
+    case Fail{e} Done{x}:
+      "bend-kube_" ++ U32.show(x)
+    case Done{host} Fail{e}:
+      host
+    case Fail{e} Fail{e2}:
+      "bend-kube"
+
+# This replica's identity: the pod name and a random suffix.
+def Kube.ident() -> IO(String):
+  IO.bind(Result<&1, &1, U32 & String, String>, String, IO.get_env("HOSTNAME"),
+    h => IO.bind(Result<&1, &1, U32 & String, U32>, String, IO.random_u32(),
+      r => IO.pure(String, Kube.ident.of(h, r))))
+
+def Kube.elect.as(+cfg: K.Config, lo: E.LOpts, drain: IO(Unit), work: IO(Unit), auto: Bool) -> IO(Unit):
+  match lo auto:
+    case E.LOpts{ns, n, id, d, dl, rt} True{}:
+      IO.bind(String, Unit, Kube.ident(),
+        +me => IO.bind(Unit, Unit, L.Log.info("leader identity", [L.Log.kv("id", me)]),
+          u => E.Leader.elect(cfg, E.LOpts{ns, n, me, d, dl, rt}, drain, work)))
+    case x False{}:
+      E.Leader.elect(cfg, x, drain, work)
+
 def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Unit), work: IO(Unit)) -> IO(Unit):
   match l:
     case Some{+lo}:
-      E.Leader.elect(cfg, lo, drain, work)
+      Kube.elect.as(cfg, lo, drain, work, String.is_empty(E.LOpts.id(lo)))
     case None{}:
       IO.bind(Unit, Unit, IO.spawn(Unit, Kube.on_signal(drain)), u => work)
 
