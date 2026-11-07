@@ -120,15 +120,17 @@ def Tls.open.direct(d: Res(Socket), +host: String, ca: String, cert: String, key
     case Fail{e}:
       IO.pure(Res(Socket), Fail{e})
 
-def Tls.open.route(r: P.Route, +host: String, +port: U32, ca: String, cert: String,
+# vh is the name the server's certificate must carry (and the SNI sent);
+# host:port is where to connect.
+def Tls.open.route(r: P.Route, +host: String, +port: U32, +vh: String, ca: String, cert: String,
   key: String, +ms: U32) -> IO(Res(Socket)):
   match r:
     case P.Direct{}:
       IO.bind(Res(Socket), Res(Socket), Tls.dial(host, port, ms),
-        d => Tls.open.direct(d, host, ca, cert, key, ms))
+        d => Tls.open.direct(d, vh, ca, cert, key, ms))
     case P.Via{P.Proxy{ph, pp, auth}}:
       IO.bind(Res(Socket), Res(Socket), Tls.dial(ph, pp, ms),
-        d => Tls.open.proxied(d, P.Proxy.connect(host, port, auth), host, ca, cert, key, ms))
+        d => Tls.open.proxied(d, P.Proxy.connect(host, port, auth), vh, ca, cert, key, ms))
     case P.NoRoute{why}:
       IO.pure(Res(Socket), Fail{(22, why)})
 
@@ -147,11 +149,21 @@ def Tls.env(name: String, alt: String) -> IO(String):
   IO.bind(Res(String), String, IO.get_env(name),
     r => IO.bind(Res(String), String, IO.get_env(alt), a => IO.pure(String, Tls.env.or(r, a))))
 
+def Tls.vname(+host: String, +name: String, none: Bool) -> String:
+  match none:
+    case True{}:
+      host
+    case False{}:
+      name
+
 # Opens a verified TLS connection to host:port (see Tls.secure), through
 # the CONNECT tunnel of HTTPS_PROXY unless NO_PROXY or a loopback host
-# says otherwise (proxy.bend).
-def Tls.open(+host: String, +port: U32, ca: String, cert: String, key: String, +ms: U32) ->
-  IO(Res(Socket)):
+# says otherwise (proxy.bend). name, when not empty, is what the server's
+# certificate must carry and the SNI sent, instead of host (kubeconfig's
+# tls-server-name, client-go's TLSClientConfig.ServerName).
+def Tls.open(+host: String, +port: U32, +name: String, ca: String, cert: String, key: String,
+  +ms: U32) -> IO(Res(Socket)):
   IO.bind(String, Res(Socket), Tls.env("HTTPS_PROXY", "https_proxy"),
     url => IO.bind(String, Res(Socket), Tls.env("NO_PROXY", "no_proxy"),
-      no => Tls.open.route(P.Proxy.route(url, no, host, port), host, port, ca, cert, key, ms)))
+      no => Tls.open.route(P.Proxy.route(url, no, host, port), host, port,
+        Tls.vname(host, name, String.is_empty(name)), ca, cert, key, ms)))

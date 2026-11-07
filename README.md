@@ -322,6 +322,11 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
 - The server is always verified against the given CA, or the system roots
   if none is given, and by name (or by IP for an IP literal), with TLS 1.2
   as the minimum.
+- `tls-server-name` (client-go's `TLSClientConfig.ServerName`) is honored:
+  the client connects to the server's host and verifies the certificate
+  against that name, which it also sends as SNI. This is how a client
+  behind NAT reaches a cluster whose certificate names `127.0.0.1` or
+  `localhost`. `K.Config.with_server_name` sets it in code.
 - `insecure-skip-tls-verify` is ignored.
 - `HTTPS_PROXY` and `NO_PROXY` are read as Go reads them (client-go uses
   Go's `ProxyFromEnvironment`), in pure Bend (`src/proxy.bend`):
@@ -472,7 +477,7 @@ docker build --build-arg EXAMPLE=mirror -t bend-kube-mirror .   # proof-gated im
 kubectl apply -f deploy/mirror.yaml
 ```
 
-- **Bend version:** bend-kube needs Bend **2.0.39**. Bend's C effect interface
+- **Bend version:** bend-kube needs Bend **2.0.40**. Bend's C effect interface
   has no ABI promise, so `tools/ci.sh` and the Dockerfile pin the version
   (the Dockerfile also checks the archive's sha256). Rebuild and rerun CI on
   every upgrade.

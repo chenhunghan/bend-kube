@@ -14,7 +14,7 @@
 # older SDK (for example .../MacOSX26.5.sdk).
 set -eu
 cd "$(dirname "$0")/.."
-need_bend=2.0.39
+need_bend=2.0.40
 have=$(bend version 2>&1 | tr -d '\n')
 case "$have" in *"$need_bend"*) ;; *) echo "bend $need_bend required (have: $have)"; exit 1;; esac
 

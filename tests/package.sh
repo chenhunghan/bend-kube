@@ -28,7 +28,7 @@ hub bend package.bend --publish "$name@$ver" > "$work/publish.out" 2>&1 \
   || { cat "$work/publish.out"; echo "FAIL publish"; exit 1; }
 hash=$(curl -fs "http://127.0.0.1:$PORT/name/$name@$ver")
 curl -fs "http://127.0.0.1:$PORT/$hash/manifest" | awk '{print $2}' > "$work/files"
-bad=$(grep -v -E '^(LICENSE|LAWS\.bend|PROOF\.bend|package\.bend|src/[a-z0-9_]+\.bend|src/effs/[a-z]+\.(c|js))$' "$work/files" || true)
+bad=$(grep -v -E '^(LICENSE|README\.md|LAWS\.bend|PROOF\.bend|package\.bend|src/[a-z0-9_]+\.bend|src/effs/[a-z]+\.(c|js))$' "$work/files" || true)
 [ -z "$bad" ] || { echo "FAIL unexpected files in the package: $bad"; exit 1; }
 echo "ok   published $name@$ver: $(wc -l < "$work/files" | tr -d ' ') files"
 

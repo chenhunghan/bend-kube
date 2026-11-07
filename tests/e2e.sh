@@ -31,6 +31,17 @@ json.dump(c, open(w + "/wrong-ca.json", "w"))
 PY
 KUBECONFIG="$work/wrong-ca.json" "$work/smoke" | grep "server certificate rejected" >/dev/null \
   && pass "an unknown CA is rejected" || fail "an unknown CA was accepted"
+python3 -I - "$work" <<'PY'
+import json, sys
+w = sys.argv[1]
+for name, out in (("kubernetes.default.svc", "sni-ok"), ("wrong.example", "sni-bad")):
+    c = json.load(open(w + "/kc.json"))
+    c["clusters"][0]["cluster"]["tls-server-name"] = name
+    json.dump(c, open(w + "/" + out + ".json", "w"))
+PY
+KUBECONFIG="$work/sni-ok.json" "$work/smoke" | grep "^ok " >/dev/null \
+  && KUBECONFIG="$work/sni-bad.json" "$work/smoke" | grep "server certificate rejected" >/dev/null \
+  && pass "tls-server-name verifies the server as that name" || fail "tls-server-name"
 
 echo "== proxy"
 # Loopback hosts never use a proxy (as in Go), so the tunnel reaches the API

@@ -23,20 +23,24 @@ type Src is Data:
 
 # pool: idle keep-alive connections to reuse (client.bend), when the
 # program made one (Config.with_pool); None opens one per request.
+# server_name: the name the server's certificate must carry, and the SNI
+# sent, when it differs from host (kubeconfig's tls-server-name; "" for
+# host).
 # limit: the client's rate limit, a bucket of tokens a request takes one of
 # (client.bend's Limit), when the program made one (Config.with_limit).
 type Config is Data:
   Config{host: String, port: U32, base: String, ca: Src, cert: Src, key: Src, token: Src,
-    namespace: String, pool: Maybe<&2, Chan(Socket)>, limit: Maybe<&2, Chan(Unit)>}
+    namespace: String, pool: Maybe<&2, Chan(Socket)>, limit: Maybe<&2, Chan(Unit)>,
+    server_name: String}
 
 def Config.host(c: Config) -> String:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
       h
 
 def Config.namespace(c: Config) -> String:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
       ns
 
 # Server URLs
@@ -210,17 +214,17 @@ def Kube.config.pick.go(ctx: String, cur: String, empty: Bool) -> String:
 def Kube.config.pick(+ctx: String, cur: String) -> String:
   Kube.config.pick.go(ctx, cur, String.is_empty(ctx))
 
-def Kube.config.fin(u: Url, ca: Src, cert: Src, key: Src, tok: Src, ns: String) ->
+def Kube.config.fin(u: Url, ca: Src, cert: Src, key: Src, tok: Src, ns: String, sn: String) ->
   Result<&2, &2, String, Config>:
   match u:
     case Url{h, p, b}:
-      Done{Config{h, p, b, ca, cert, key, tok, ns, None{}, None{}}}
+      Done{Config{h, p, b, ca, cert, key, tok, ns, None{}, None{}, sn}}
 
-def Kube.config.server(s: J.Json, ca: Src, cert: Src, key: Src, tok: Src, ns: String) ->
+def Kube.config.server(s: J.Json, ca: Src, cert: Src, key: Src, tok: Src, ns: String, sn: String) ->
   Result<&2, &2, String, Config>:
   match s:
     case J.JStr{url}:
-      Kube.config.fin(Url.parse(url), ca, cert, key, tok, ns)
+      Kube.config.fin(Url.parse(url), ca, cert, key, tok, ns, sn)
     case _:
       Fail{"kubeconfig: the cluster has no server"}
 
@@ -231,7 +235,8 @@ def Kube.config.build(+cl: J.Json, +u: J.Json, ns: String, name: String, missing
       Fail{"kubeconfig: no context named " ++ name}
     case False{}:
       Kube.config.server(J.Json.get(cl, "server"), Kube.src(cl, "certificate-authority"),
-        Kube.src(u, "client-certificate"), Kube.src(u, "client-key"), Kube.token(u), ns)
+        Kube.src(u, "client-certificate"), Kube.src(u, "client-key"), Kube.token(u), ns,
+        J.Json.str_or(J.Json.get(cl, "tls-server-name"), ""))
 
 def Kube.config.with(+kc: J.Json, name: String, +c: J.Json) -> Result<&2, &2, String, Config>:
   Kube.config.build(
@@ -259,7 +264,7 @@ def InCluster.dir() -> String:
 # (client-go's InClusterConfig). An IPv6 host needs no brackets here.
 def InCluster.config(host: String, port: String, ns: String) -> Config:
   Config{host, Url.port(port, 443), "", FromFile{InCluster.dir() ++ "/ca.crt"}, NoSrc{}, NoSrc{},
-    FromFile{InCluster.dir() ++ "/token"}, String.trim(ns), None{}, None{}}
+    FromFile{InCluster.dir() ++ "/token"}, String.trim(ns), None{}, None{}, ""}
 
 # Merging and paths
 # -----------------
@@ -368,20 +373,31 @@ def Kube.dir(+p: String) -> String:
 
 def Config.with_pool(c: Config, pool: Chan(Socket)) -> Config:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
-      Config{h, p, b, ca, cert, key, tok, ns, Some{pool}, lm}
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+      Config{h, p, b, ca, cert, key, tok, ns, Some{pool}, lm, sn}
 
 def Config.pool(c: Config) -> Maybe<&2, Chan(Socket)>:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
       pl
 
 def Config.with_limit(c: Config, limit: Chan(Unit)) -> Config:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
-      Config{h, p, b, ca, cert, key, tok, ns, pl, Some{limit}}
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+      Config{h, p, b, ca, cert, key, tok, ns, pl, Some{limit}, sn}
 
 def Config.limit(c: Config) -> Maybe<&2, Chan(Unit)>:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
       lm
+
+def Config.server_name(c: Config) -> String:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+      sn
+
+# The config with the name the server's certificate must carry.
+def Config.with_server_name(c: Config, name: String) -> Config:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+      Config{h, p, b, ca, cert, key, tok, ns, pl, lm, name}

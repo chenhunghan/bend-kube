@@ -5,6 +5,8 @@ import ../../src/net.bend as N
 # For tests/tls.sh: opens host:port (args) with net.bend's Tls.open, the
 # PEM roots, client certificate and key in PROBE_CA, PROBE_CERT and
 # PROBE_KEY, sends a GET, and prints "ok <status line>" or "error: <why>".
+# PROBE_SERVER_NAME, when set, is the name to verify (and send as SNI)
+# instead of the host.
 
 def line(bs: List<&2, U32>) -> String:
   String.take(U.Utf8.decode_all(bs), 15n)
@@ -39,11 +41,11 @@ def env(r: N.Res(String)) -> String:
     case Fail{e}:
       ""
 
-def run(args: List<String>, ca: String, cert: String, key: String) -> IO(Unit):
+def run(args: List<String>, sn: String, ca: String, cert: String, key: String) -> IO(Unit):
   match args:
     case Con{prog, Con{h, Con{p, t}}}:
       IO.bind(N.Res(Socket), Unit,
-        N.Tls.open(h, Maybe.default(&2, U32, U32.read(p), 443), ca, cert, key, 3000), opened)
+        N.Tls.open(h, Maybe.default(&2, U32, U32.read(p), 443), sn, ca, cert, key, 3000), opened)
     case _:
       IO.print("usage: tls_probe HOST PORT")
 
@@ -53,4 +55,5 @@ def main() -> IO(Unit):
     ca : N.Res(String) <- IO.get_env("PROBE_CA")
     cert : N.Res(String) <- IO.get_env("PROBE_CERT")
     key : N.Res(String) <- IO.get_env("PROBE_KEY")
-    run(argv, env(ca), env(cert), env(key))
+    sn : N.Res(String) <- IO.get_env("PROBE_SERVER_NAME")
+    run(argv, env(sn), env(ca), env(cert), env(key))

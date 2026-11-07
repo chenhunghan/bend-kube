@@ -206,7 +206,7 @@ def Creds.load.a(ca: Res(String), cert: K.Src, key: K.Src, tok: K.Src) -> IO(Res
 # Reads every secret a Config names; token files are read afresh each time.
 def Creds.load(c: K.Config) -> IO(Res(Creds)):
   match c:
-    case K.Config{h, p, b, ca, cert, key, tok, ns, pl, lm}:
+    case K.Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
       IO.bind(Res(String), Res(Creds), Src.load(ca), a => Creds.load.a(a, cert, key, tok))
 
 def Conn.auth.go(token: String, none: Bool) -> List<&2, H.Header>:
@@ -276,19 +276,19 @@ def Conn.open.go(r: Res(Socket), text: String) -> IO(Res(N.Tls)):
     case Fail{e}:
       IO.pure(Res(N.Tls), Fail{e})
 
-def Conn.open.creds(+h: String, +p: U32, +base: String, req: H.Req, keep: Bool, cr: Res(Creds)) ->
-  IO(Res(N.Tls)):
+def Conn.open.creds(+h: String, +p: U32, +sn: String, +base: String, req: H.Req, keep: Bool,
+  cr: Res(Creds)) -> IO(Res(N.Tls)):
   match cr:
     case Done{Creds{ca, cert, key, +tok}}:
-      IO.bind(Res(Socket), Res(N.Tls), N.Tls.open(h, p, ca, cert, key, 15000),
+      IO.bind(Res(Socket), Res(N.Tls), N.Tls.open(h, p, sn, ca, cert, key, 15000),
         r => Conn.open.go(r, Conn.render(req, base, Conn.host_header(h, p), tok, keep)))
     case Fail{e}:
       IO.pure(Res(N.Tls), Fail{e})
 
 def Conn.open(+cfg: K.Config, req: H.Req, keep: Bool) -> IO(Res(N.Tls)):
   match cfg:
-    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm}:
-      IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.open.creds(h, p, b, req, keep, cr))
+    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn}:
+      IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.open.creds(h, p, sn, b, req, keep, cr))
 
 # Reading a reply
 # ---------------
@@ -394,7 +394,7 @@ def Conn.send_on.creds(s: Socket, +h: String, +p: U32, +base: String, req: H.Req
 
 def Conn.send_on(+cfg: K.Config, s: Socket, req: H.Req) -> IO(Res(N.Tls)):
   match cfg:
-    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm}:
+    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn}:
       IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.send_on.creds(s, h, p, b, req, cr))
 
 def Http.got_any(r: H.Resp) -> Bool:
