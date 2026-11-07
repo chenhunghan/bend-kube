@@ -11,9 +11,10 @@ import ./queue.bend as Q
 # Client
 # ======
 #
-# kube-client in Bend: one verified TLS connection per request (Connection:
-# close), so no connection state outlives a call and a broken server cannot
-# poison a pool. Watches hold their connection for the stream's life; see
+# kube-client in Bend: requests go over verified TLS connections from a
+# keep-alive pool (Kube.pool), each returned only after a response its
+# framing ended, and a stale one retried by Go's transport rule (Pooling,
+# below). Watches hold their own connection for the stream's life; see
 # watcher.bend.
 #
 # Loops here take what just happened as a parameter (an event), and match

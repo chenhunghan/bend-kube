@@ -223,8 +223,10 @@ transforms kube-rs and controller-runtime users apply by hand.
 - A key has at most one pending wake, the earliest asked for by the
   monotonic clock (kube-runtime's scheduler). A later or equal request
   starts no sleeper; only an earlier one starts another, and the outdone
-  sleeper wakes to nothing. So requeues never pile up timers. Delays of a second or more get up to 10% jitter, so
-  requeues armed together spread out.
+  sleeper wakes to nothing when its time comes. Requeues of a key don't
+  pile up timers; only strictly earlier wakes add one each. Delays of a
+  second or more get up to 10% jitter, so requeues armed together spread
+  out.
 - When a key leaves the queue and its object is gone, its bookkeeping is
   forgotten. That covers objects deleted while their key ran or waited, and
   objects a relist dropped.
