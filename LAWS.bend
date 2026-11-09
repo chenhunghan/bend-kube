@@ -521,6 +521,16 @@ law leader_late_at_deadline:
 law leader_nap_bounded:
   {E.Lease.nap(9900, 0, 10000, 2000, True{}) == 100 : U32}
 
+# A candidate whose winning write lands past the renew deadline, counted
+# from the start of that attempt, must not start: 2.5s after an attempt
+# begun at 0.1s, with a 2.4s deadline, it is overdue.
+law acquisition_overdue_stops:
+  {E.Lease.overdue(2600, 0, 100, 2400, False{}) == True{} : Bool}
+
+# A leader counts from its last renewal, however recent the attempt.
+law renewal_overdue_from_last:
+  {E.Lease.overdue(10000, 0, 9000, 10000, True{}) == True{} : Bool}
+
 # Conditions (apimachinery's meta.SetStatusCondition)
 # ---------------------------------------------------
 

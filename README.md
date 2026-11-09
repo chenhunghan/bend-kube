@@ -261,8 +261,13 @@ deadline):
   hung write cannot keep a stale leader running. A renewal that lands only
   after the deadline also counts as lost, as in client-go. After a failed
   try, a leader waits at most what is left of its deadline, and checks the
-  deadline before every request. So it stops once the deadline is reached,
-  whatever the retry period.
+  deadline before every read and every write and after every call. So it
+  stops once the deadline is reached, whatever the retry period.
+- After a success it also naps no further than the deadline. A write that
+  lands past the deadline stops the process rather than starting or
+  continuing work; an acquisition counts from the start of the attempt that
+  won it. Together with `deadline < duration`, this means a leader always
+  stops before a standby can judge its Lease expired.
 - A Lease is observed when its read returns, and another holder's Lease
   lasts its own `leaseDurationSeconds`, so a slow read or a contender
   configured with a shorter duration can't expire a live leader.
@@ -435,7 +440,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 61 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 63 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -485,7 +490,9 @@ loop.
   - another holder's Lease lasts its own recorded duration;
   - the default timing is accepted, and a lease no longer than its renew
     deadline is refused;
-  - a leader is late once its deadline is reached, and never naps past it.
+  - a leader is late once its deadline is reached, and never naps past it;
+  - a write that lands past the deadline is overdue: a leader counts from
+    its last renewal, an acquisition from the start of its attempt.
 - **Finalizer cleanup:** a failed or held cleanup keeps the finalizer, and
   a finished one releases it.
 - **Conditions:** setting a condition with an unchanged status keeps its

@@ -151,16 +151,18 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
         leading, last, start)
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LCreate{l}, ob}}}:
       IO.bind(U32, Unit, Leader.mono(),
-        m1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
-          Leader.timed(E.Lease.room(m1, last, LOpts.deadline(o), leading),
-            Cl.Client.create(cfg, LOpts.api(o), l)),
-          r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
+        +m1 => Leader.renewed(Bool.and(leading, E.Lease.late(m1, last, LOpts.deadline(o))),
+          IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
+            Leader.timed(E.Lease.room(m1, last, LOpts.deadline(o), leading),
+              Cl.Client.create(cfg, LOpts.api(o), l)),
+            r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start))))
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LUpdate{l}, ob}}}:
       IO.bind(U32, Unit, Leader.mono(),
-        m1 => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
-          Leader.timed(E.Lease.room(m1, last, LOpts.deadline(o), leading),
-            Cl.Client.replace(cfg, LOpts.api(o), LOpts.name(o), l)),
-          r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start)))
+        +m1 => Leader.renewed(Bool.and(leading, E.Lease.late(m1, last, LOpts.deadline(o))),
+          IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
+            Leader.timed(E.Lease.room(m1, last, LOpts.deadline(o), leading),
+              Cl.Client.replace(cfg, LOpts.api(o), LOpts.name(o), l)),
+            r => Leader.run(oc, f, LCheck{now, Leader.wrote(r)}, cfg, o, ob, leading, last, start))))
     case oc 1n+f LDecided{+now, Done{E.Decision{E.LWait{}, ob}}}:
       Leader.run(oc, f, LCheck{now, False{}}, cfg, o, ob, leading, last, start)
     case oc 1n+f LDecided{+now, Fail{e}}:
@@ -169,13 +171,17 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
     case oc 1n+f LCheck{+now, ok}:
       # lateness by the clock after the calls, not before them
       IO.bind(U32, Unit, Leader.mono(),
-        m2 => Leader.run(oc, f, LWrote{now, ok, E.Lease.late(m2, last, LOpts.deadline(o))},
+        +m2 => Leader.run(oc, f, LWrote{now, ok, E.Lease.overdue(m2, last, now, LOpts.deadline(o), leading)},
           cfg, o, obs, leading, last, start))
-    case oc 1n+f LWrote{now, True{}, late}:
-      Leader.renewed(Bool.and(leading, late),
+    case oc 1n+f LWrote{+now, True{}, late}:
+      # a write that landed too late (a slow acquisition or renewal) stops
+      # the process rather than starting or continuing work
+      Leader.renewed(late,
         IO.bind(Unit, Unit, Leader.started(leading, start),
-          u => IO.bind(Unit, Unit, IO.sleep(LOpts.retry(o)),
-            u2 => Leader.run(oc, f, LTry{}, cfg, o, obs, True{}, now, None{}))))
+          u => IO.bind(U32, Unit, Leader.mono(),
+            m3 => IO.bind(Unit, Unit,
+              IO.sleep(E.Lease.nap(m3, now, LOpts.deadline(o), LOpts.retry(o), True{})),
+              u2 => Leader.run(oc, f, LTry{}, cfg, o, obs, True{}, now, None{})))))
     case oc 1n+f LWrote{now, False{}, late}:
       Leader.run(oc, f, LFail{Bool.and(leading, late)}, cfg, o, obs, leading, last, start)
     case oc 1n+f LFail{True{}}:
