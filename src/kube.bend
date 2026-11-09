@@ -188,7 +188,7 @@ def Opts.elects(o: Opts) -> Bool:
     case _:
       False{}
 
-def Kube.fenced(+cfg: K.Config, m: Maybe<&2, Chan(K.Fence)>) -> K.Config:
+def Kube.fenced(+cfg: K.Config, m: Maybe<&2, Chan(K.FenceMsg)>) -> K.Config:
   match m:
     case Some{ch}:
       K.Config.with_fence(cfg, ch)
@@ -197,17 +197,17 @@ def Kube.fenced(+cfg: K.Config, m: Maybe<&2, Chan(K.Fence)>) -> K.Config:
 
 # Under leader election, a leadership fence shared by the controllers'
 # config and the election's (Leader.fence, Fence.check in client.bend).
-def Kube.fence(on: Bool) -> IO(Maybe<&2, Chan(K.Fence)>):
+def Kube.fence(on: Bool) -> IO(Maybe<&2, Chan(K.FenceMsg)>):
   match on:
     case True{}:
-      IO.bind(Chan(K.Fence), Maybe<&2, Chan(K.Fence)>, Chan.new(K.Fence, 1),
-        ch => IO.pure(Maybe<&2, Chan(K.Fence)>, Some{ch}))
+      IO.bind(Chan(K.FenceMsg), Maybe<&2, Chan(K.FenceMsg)>, Cl.Fence.start(),
+        ch => IO.pure(Maybe<&2, Chan(K.FenceMsg)>, Some{ch}))
     case False{}:
-      IO.pure(Maybe<&2, Chan(K.Fence)>, None{})
+      IO.pure(Maybe<&2, Chan(K.FenceMsg)>, None{})
 
 def Kube.pooled(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, specs: List<&2, X.Spec>,
   +o: Opts) -> IO(Unit):
-  IO.bind(Maybe<&2, Chan(K.Fence)>, Unit, Kube.fence(Opts.elects(o)),
+  IO.bind(Maybe<&2, Chan(K.FenceMsg)>, Unit, Kube.fence(Opts.elects(o)),
     +fc => IO.bind(K.Config, Unit, Kube.rate(o, cfg),
       cfg2 => Kube.start(~rec, Kube.fenced(cfg2, fc), Kube.fenced(cfg, fc), specs, o)))
 

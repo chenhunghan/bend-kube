@@ -306,26 +306,31 @@ def Conn.open.sent(p: Socket & Res(Unit)) -> IO(Res(N.Tls)):
     case (s, Fail{e}):
       IO.bind(Unit, Res(N.Tls), N.Tls.close(s), u => IO.pure(Res(N.Tls), Fail{e}))
 
-def Conn.open.go(r: Res(Socket), text: String) -> IO(Res(N.Tls)):
-  match r:
-    case Done{s}:
-      IO.bind(Socket & Res(Unit), Res(N.Tls), N.Tls.send(s, text, 30000), Conn.open.sent)
-    case Fail{e}:
-      IO.pure(Res(N.Tls), Fail{e})
+def Fence.mono() -> IO(U32):
+  IO.bind(Nat, U32, IO.now(), n => IO.pure(U32, U32.from_nat(n)))
 
-def Conn.open.creds(+h: String, +p: U32, +sn: String, +base: String, req: H.Req, keep: Bool,
-  cr: Res(Creds)) -> IO(Res(N.Tls)):
-  match cr:
-    case Done{Creds{ca, cert, key, +tok}}:
-      IO.bind(Res(Socket), Res(N.Tls), N.Tls.open(h, p, sn, ca, cert, key, 15000),
-        r => Conn.open.go(r, Conn.render(req, base, Conn.host_header(h, p), tok, keep)))
-    case Fail{e}:
-      IO.pure(Res(N.Tls), Fail{e})
+# The leadership fence: the lease's last renewal, held by a keeper the
+# leader updates (Leader.fence). Under leader election every write of
+# request bytes (a request's first send, a pooled send, a retry, exec's
+# input) asks the keeper first, and a lease past its renew deadline exits
+# the process before the bytes leave: whatever delays the leader loop (a
+# long computation on the shared event loop), nothing is written after a
+# standby may have taken over. The keeper always answers, so a reading is
+# never missing.
+def Fence.check.late(late: Bool) -> IO(Unit):
+  match late:
+    case True{}:
+      IO.die(Unit, 1, "bend-kube: leader lease past its renew deadline; exiting before the request leaves")
+    case False{}:
+      IO.pure(Unit, Unit{})
 
-def Conn.open(+cfg: K.Config, req: H.Req, keep: Bool) -> IO(Res(N.Tls)):
-  match cfg:
-    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
-      IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.open.creds(h, p, sn, b, req, keep, cr))
+def Fence.check.at(f: Maybe<&2, K.Fence>, +now: U32) -> IO(Unit):
+  match f:
+    case Some{K.Fence{+last, +deadline}}:
+      Fence.check.late(E.Lease.late(now, last, deadline))
+    case None{}:
+      # no renewal yet: no controller runs before the first one
+      IO.pure(Unit, Unit{})
 
 # Reading a reply
 # ---------------
@@ -335,6 +340,46 @@ def Conn.open(+cfg: K.Config, req: H.Req, keep: Bool) -> IO(Res(N.Tls)):
 type ReadEv is Type:
   RGot{sock: Socket, r: Result<&1, &1, U32 & String, List<&2, U32>>}
   RChk{sock: Socket, done: Bool, eof: Bool, bad: Bool}
+
+def Fence.check.got(m: Maybe<&1, Maybe<&2, K.Fence>>) -> IO(Unit):
+  match m:
+    case Some{f}:
+      IO.bind(U32, Unit, Fence.mono(), now => Fence.check.at(f, now))
+    case None{}:
+      IO.die(Unit, 1, "bend-kube: the leadership fence keeper is gone; exiting")
+
+# Asks the keeper for the reading and exits if the lease is past its
+# deadline; nothing to check without leader election.
+def Fence.check(m: Maybe<&2, Chan(K.FenceMsg)>) -> IO(Unit):
+  match m:
+    case Some{+ch}:
+      IO.bind(Chan(Maybe<&2, K.Fence>), Unit, Chan.new(Maybe<&2, K.Fence>, 1),
+        +r => IO.bind(Result<&1, &1, K.FenceMsg, Unit>, Unit, Chan.send(K.FenceMsg, ch, K.FGet{r}),
+          u => IO.bind(Maybe<&1, Maybe<&2, K.Fence>>, Unit, Chan.recv(Maybe<&2, K.Fence>, r), Fence.check.got)))
+    case None{}:
+      IO.pure(Unit, Unit{})
+
+def Conn.open.go(r: Res(Socket), text: String, fc: Maybe<&2, Chan(K.FenceMsg)>) -> IO(Res(N.Tls)):
+  match r:
+    case Done{s}:
+      IO.bind(Unit, Res(N.Tls), Fence.check(fc),
+        u => IO.bind(Socket & Res(Unit), Res(N.Tls), N.Tls.send(s, text, 30000), Conn.open.sent))
+    case Fail{e}:
+      IO.pure(Res(N.Tls), Fail{e})
+
+def Conn.open.creds(+h: String, +p: U32, +sn: String, +base: String, req: H.Req, keep: Bool,
+  fc: Maybe<&2, Chan(K.FenceMsg)>, cr: Res(Creds)) -> IO(Res(N.Tls)):
+  match cr:
+    case Done{Creds{ca, cert, key, +tok}}:
+      IO.bind(Res(Socket), Res(N.Tls), N.Tls.open(h, p, sn, ca, cert, key, 15000),
+        r => Conn.open.go(r, Conn.render(req, base, Conn.host_header(h, p), tok, keep), fc))
+    case Fail{e}:
+      IO.pure(Res(N.Tls), Fail{e})
+
+def Conn.open(+cfg: K.Config, req: H.Req, keep: Bool) -> IO(Res(N.Tls)):
+  match cfg:
+    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.open.creds(h, p, sn, b, req, keep, fc, cr))
 
 def ReadEv.got(p: Socket & Res(List<&2, U32>)) -> ReadEv:
   match p:
@@ -428,20 +473,21 @@ def Call.read(t: Res(N.Tls)) -> IO(Result<&2, &2, KErr, Reply>):
 # written, or when nothing came back and its method is idempotent.
 
 # Sends req on an open (pooled) connection.
-def Conn.send_on.creds(s: Socket, +h: String, +p: U32, +base: String, req: H.Req, cr: Res(Creds)) ->
-  IO(Res(N.Tls)):
+def Conn.send_on.creds(s: Socket, +h: String, +p: U32, +base: String, req: H.Req,
+  fc: Maybe<&2, Chan(K.FenceMsg)>, cr: Res(Creds)) -> IO(Res(N.Tls)):
   match cr:
     case Done{Creds{ca, cert, key, +tok}}:
-      IO.bind(Socket & Res(Unit), Res(N.Tls),
-        N.Tls.send(s, Conn.render(req, base, Conn.host_header(h, p), tok, True{}), 30000),
-        Conn.open.sent)
+      IO.bind(Unit, Res(N.Tls), Fence.check(fc),
+        u => IO.bind(Socket & Res(Unit), Res(N.Tls),
+          N.Tls.send(s, Conn.render(req, base, Conn.host_header(h, p), tok, True{}), 30000),
+          Conn.open.sent))
     case Fail{e}:
       IO.bind(Unit, Res(N.Tls), N.Tls.close(s), u => IO.pure(Res(N.Tls), Fail{e}))
 
 def Conn.send_on(+cfg: K.Config, s: Socket, req: H.Req) -> IO(Res(N.Tls)):
   match cfg:
     case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
-      IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.send_on.creds(s, h, p, b, req, cr))
+      IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.send_on.creds(s, h, p, b, req, fc, cr))
 
 def Http.got_any(r: H.Resp) -> Bool:
   match r:
@@ -451,6 +497,12 @@ def Http.got_any(r: H.Resp) -> Bool:
       False{}
     case _:
       True{}
+
+type PEv is Type:
+  PTook{m: Poll<&1, &1, Maybe<&1, Socket>, Unit>}
+  PSent{reused: Bool, r: Result<&1, &1, U32 & String, N.Tls>}
+  PRead{reused: Bool, r: Socket & H.Resp}
+  PFin{sock: Socket, resp: H.Resp, keep: Bool, retry: Bool}
 
 def Http.closes(r: H.Resp) -> Bool:
   match r:
@@ -493,12 +545,6 @@ def Pool.put.done(p: Poll<&1, &1, Result<&1, &1, Socket, Unit>, Socket>) -> IO(U
 def Pool.put(+pool: Chan(Socket), s: Socket) -> IO(Unit):
   IO.bind(Poll<&1, &1, Result<&1, &1, Socket, Unit>, Socket>, Unit,
     Chan.try_send(Socket, pool, s, 0), Pool.put.done)
-
-type PEv is Type:
-  PTook{m: Poll<&1, &1, Maybe<&1, Socket>, Unit>}
-  PSent{reused: Bool, r: Result<&1, &1, U32 & String, N.Tls>}
-  PRead{reused: Bool, r: Socket & H.Resp}
-  PFin{sock: Socket, resp: H.Resp, keep: Bool, retry: Bool}
 
 def PEv.read(+reused: Bool, p: Socket & H.Resp) -> PEv:
   PRead{reused, p}
@@ -615,47 +661,32 @@ def Limit.start(+qps: U32, +burst: U32) -> IO(Chan(Unit)):
           U32.max(burst, 1), 0)),
         u2 => IO.pure(Chan(Unit), ch))))
 
-def Fence.check.late(late: Bool) -> IO(Unit):
-  match late:
-    case True{}:
-      IO.die(Unit, 1, "bend-kube: leader lease past its renew deadline; exiting before the request leaves")
-    case False{}:
+def Fence.serve(outer: Nat, fuel: Nat, m: Maybe<&1, K.FenceMsg>, +cur: Maybe<&2, K.Fence>,
+  +inbox: Chan(K.FenceMsg)) -> IO(Unit):
+  match outer fuel m:
+    case 0n 0n x:
+      IO.die(Unit, 1, "bend-kube: fence keeper out of steps")
+    case 1n+o 0n x:
+      Fence.serve(o, 4294967295n, x, cur, inbox)
+    case o 1n+f None{}:
       IO.pure(Unit, Unit{})
+    case o 1n+f Some{K.FGet{r}}:
+      IO.bind(Result<&1, &1, Maybe<&2, K.Fence>, Unit>, Unit, Chan.send(Maybe<&2, K.Fence>, r, cur),
+        u => IO.bind(Maybe<&1, K.FenceMsg>, Unit, Chan.recv(K.FenceMsg, inbox),
+          x => Fence.serve(o, f, x, cur, inbox)))
+    case o 1n+f Some{K.FSet{fc}}:
+      IO.bind(Maybe<&1, K.FenceMsg>, Unit, Chan.recv(K.FenceMsg, inbox),
+        x => Fence.serve(o, f, x, Some{fc}, inbox))
 
-# The leadership fence: a reading of the lease's last renewal. Under leader
-# election every controller request checks it, and a lease past its renew
-# deadline exits the process before the request leaves: whatever delays
-# the leader loop (a long computation on the shared event loop), no write
-# goes out after a standby may have taken over.
-def Fence.check.at(f: Maybe<&1, K.Fence>, +now: U32) -> IO(Unit):
-  match f:
-    case Some{K.Fence{+last, +deadline}}:
-      Fence.check.late(E.Lease.late(now, last, deadline))
-    case None{}:
-      IO.pure(Unit, Unit{})
-
-def Fence.mono() -> IO(U32):
-  IO.bind(Nat, U32, IO.now(), n => IO.pure(U32, U32.from_nat(n)))
-
-def Fence.peek(p: Poll<&1, &1, Maybe<&1, K.Fence>, Unit>, +ch: Chan(K.Fence)) -> IO(Unit):
-  match p:
-    case Ready{Some{+f}}:
-      IO.bind(Poll<&1, &1, Result<&1, &1, K.Fence, Unit>, K.Fence>, Unit, Chan.try_send(K.Fence, ch, f, 0),
-        u => IO.bind(U32, Unit, Fence.mono(), now => Fence.check.at(Some{f}, now)))
-    case _:
-      # another request holds the reading for a moment, or none is set yet
-      IO.pure(Unit, Unit{})
-
-def Fence.check(m: Maybe<&2, Chan(K.Fence)>) -> IO(Unit):
-  match m:
-    case Some{+ch}:
-      IO.bind(Poll<&1, &1, Maybe<&1, K.Fence>, Unit>, Unit, Chan.try_recv(K.Fence, ch, 0), p => Fence.peek(p, ch))
-    case None{}:
-      IO.pure(Unit, Unit{})
+# Starts a fence keeper with no reading yet.
+def Fence.start() -> IO(Chan(K.FenceMsg)):
+  IO.bind(Chan(K.FenceMsg), Chan(K.FenceMsg), Chan.new(K.FenceMsg, 4096),
+    +c => IO.bind(Unit, Chan(K.FenceMsg), IO.spawn(Unit,
+      IO.bind(Maybe<&1, K.FenceMsg>, Unit, Chan.recv(K.FenceMsg, c),
+        x => Fence.serve(4294967295n, 4294967295n, x, None{}, c))), u => IO.pure(Chan(K.FenceMsg), c)))
 
 def Client.send.go(+cfg: K.Config, req: H.Req) -> IO(Result<&2, &2, KErr, Reply>):
-  IO.bind(Unit, Result<&2, &2, KErr, Reply>, Fence.check(K.Config.fence(cfg)),
-    u => Client.send.with(cfg, req, K.Config.pool(cfg)))
+  Client.send.with(cfg, req, K.Config.pool(cfg))
 
 def Client.send.gate(+cfg: K.Config, req: H.Req, m: Maybe<&2, Chan(Unit)>) ->
   IO(Result<&2, &2, KErr, Reply>):

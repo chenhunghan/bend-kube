@@ -270,12 +270,20 @@ deadline):
   outlasts the deadline by at least a second, a leader always stops before
   a standby can judge its Lease expired.
 - **Leadership fence.** The leader loop shares Bend's event loop with every
-  reconcile, so a long computation could delay its checks. The controllers'
-  client therefore checks a fence before every request: a reading of the
-  last renewal that the leader moves after each success. A request found
-  past the renew deadline exits the process before it leaves, so no write
-  goes out after a standby may have taken over, however the loop is
-  scheduled.
+  reconcile, so a long computation could delay its checks. A fence keeper
+  therefore holds the last renewal, which the leader moves after each
+  success. Immediately before every write of request bytes, the client asks
+  the keeper. That covers a request's first send, a pooled send, a retry on
+  a fresh connection, and exec's input. A write found past the renew
+  deadline exits the process before the bytes leave. The keeper always
+  answers, so a check never passes for want of a reading. Watches and log
+  streams are reads; they go through the same send path and are fenced too.
+  What remains is the single step between the check and the write effect
+  that follows it: another computation could run there, and a long one
+  could carry the write past the deadline. Kubernetes has no server-side
+  fencing tokens, so client-side fencing can only narrow this, not close it.
+  The 1s minimum margin between deadline and lease is the budget for it, so
+  keep long pure computations out of reconciles.
 - A Lease is observed when its read returns, and another holder's Lease
   lasts its own `leaseDurationSeconds`, so a slow read or a contender
   configured with a shorter duration can't expire a live leader.

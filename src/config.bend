@@ -36,10 +36,16 @@ type Src is Data:
 type Fence is Data:
   Fence{last: U32, deadline: U32}
 
+# What the fence keeper (client.bend) answers: the current reading (None
+# before the first renewal), or takes: a new reading.
+type FenceMsg is Data:
+  FGet{reply: Chan(Maybe<&2, Fence>)}
+  FSet{fence: Fence}
+
 type Config is Data:
   Config{host: String, port: U32, base: String, ca: Src, cert: Src, key: Src, token: Src,
     namespace: String, pool: Maybe<&2, Chan(Socket)>, limit: Maybe<&2, Chan(Unit)>,
-    server_name: String, fence: Maybe<&2, Chan(Fence)>}
+    server_name: String, fence: Maybe<&2, Chan(FenceMsg)>}
 
 def Config.host(c: Config) -> String:
   match c:
@@ -410,14 +416,14 @@ def Config.with_server_name(c: Config, name: String) -> Config:
     case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       Config{h, p, b, ca, cert, key, tok, ns, pl, lm, name, fc}
 
-def Config.fence(c: Config) -> Maybe<&2, Chan(Fence)>:
+def Config.fence(c: Config) -> Maybe<&2, Chan(FenceMsg)>:
   match c:
     case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       fc
 
 # The config with a leadership fence (Kube.start sets it for the
 # controllers when they run under leader election).
-def Config.with_fence(c: Config, f: Chan(Fence)) -> Config:
+def Config.with_fence(c: Config, f: Chan(FenceMsg)) -> Config:
   match c:
     case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, Some{f}}
