@@ -175,7 +175,7 @@ def Lease.timing.go(zero: Bool, short: Bool, tight: Bool) -> Maybe<&2, String>:
     case True{} s t:
       Some{"leader election: lease duration, renew deadline and retry period must all be above zero"}
     case False{} True{} t:
-      Some{"leader election: the lease duration must be longer than the renew deadline"}
+      Some{"leader election: the lease duration must exceed the renew deadline by at least a second"}
     case False{} False{} True{}:
       Some{"leader election: the renew deadline must be longer than 1.2 retry periods"}
     case False{} False{} False{}:
@@ -189,12 +189,14 @@ def Lease.timing.big(+dur: U32, +deadline: U32, +retry: U32, big: Bool) -> Maybe
       Some{"leader election: lease duration, renew deadline and retry period must each be at most a day"}
     case False{}:
       Lease.timing.go(Bool.or(Bool.or(U32.is_eq(dur, 0), U32.is_eq(deadline, 0)), U32.is_eq(retry, 0)),
-        U32.is_le((dur * 1000 : U32), deadline), U32.is_le((deadline * 10 : U32), (retry * 12 : U32)))
+        U32.is_lt((dur * 1000 : U32), (deadline + 1000 : U32)), U32.is_le((deadline * 10 : U32), (retry * 12 : U32)))
 
 # Election timing that keeps two leaders from acting at once, as
-# client-go's NewLeaderElector checks it: every setting above zero, the
-# lease (dur, seconds) longer than the renew deadline (ms), and the
-# deadline longer than 1.2 retry periods (ms). The fault, if any.
+# client-go's NewLeaderElector checks it, plus a margin: every setting
+# above zero, the lease (dur, seconds) longer than the renew deadline (ms)
+# by at least a second (the slack between a leader stopping and a standby
+# starting), and the deadline longer than 1.2 retry periods (ms). The
+# fault, if any.
 def Lease.timing(+dur: U32, +deadline: U32, +retry: U32) -> Maybe<&2, String>:
   Lease.timing.big(dur, deadline, retry,
     Bool.or(Bool.or(U32.is_gt(dur, 86400), U32.is_gt(deadline, 86400000)), U32.is_gt(retry, 86400000)))

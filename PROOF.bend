@@ -230,3 +230,6 @@ def Laws.acquisition_overdue_stops():
 
 def Laws.renewal_overdue_from_last():
   {==}
+
+def Laws.lease_thin_margin_refused():
+  {==}

@@ -7,6 +7,7 @@ import ./config.bend as K
 import ./net.bend as N
 import ./yaml.bend as Y
 import ./queue.bend as Q
+import ./lease.bend as E
 
 # Client
 # ======
@@ -89,14 +90,14 @@ def KErr.retry_after(e: KErr) -> Maybe<&2, U32>:
 def KErr.action.go(+e: KErr, m: Maybe<&2, U32>) -> Q.Action:
   match m:
     case Some{+n}:
-      Q.RetryIn{KErr.show(e), (U32.min(n, 1000) * 1000 : U32)}
+      Q.RetryIn{KErr.show(e), (U32.max(U32.min(n, 1000), 1) * 1000 : U32)}
     case None{}:
       Q.Retry{KErr.show(e)}
 
 # What a reconcile answers after a failed call: retry after the delay the
-# server named (a 429's Retry-After), at most 1000s (the key backoff's own
-# cap, so a bad value cannot park a key for weeks), else retry with the
-# key's backoff.
+# server named (a 429's Retry-After), from 1s (so a 0 cannot spin) to at
+# most 1000s (the key backoff's own cap, so a bad value cannot park a key
+# for weeks), else retry with the key's backoff.
 def KErr.action(+e: KErr) -> Q.Action:
   KErr.action.go(e, KErr.retry_after(e))
 
@@ -242,7 +243,7 @@ def Creds.load.a(ca: Res(String), cert: K.Src, key: K.Src, tok: K.Src) -> IO(Res
 # Reads every secret a Config names; token files are read afresh each time.
 def Creds.load(c: K.Config) -> IO(Res(Creds)):
   match c:
-    case K.Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+    case K.Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       IO.bind(Res(String), Res(Creds), Src.load(ca), a => Creds.load.a(a, cert, key, tok))
 
 def Conn.auth.go(token: String, none: Bool) -> List<&2, H.Header>:
@@ -323,7 +324,7 @@ def Conn.open.creds(+h: String, +p: U32, +sn: String, +base: String, req: H.Req,
 
 def Conn.open(+cfg: K.Config, req: H.Req, keep: Bool) -> IO(Res(N.Tls)):
   match cfg:
-    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn}:
+    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.open.creds(h, p, sn, b, req, keep, cr))
 
 # Reading a reply
@@ -439,7 +440,7 @@ def Conn.send_on.creds(s: Socket, +h: String, +p: U32, +base: String, req: H.Req
 
 def Conn.send_on(+cfg: K.Config, s: Socket, req: H.Req) -> IO(Res(N.Tls)):
   match cfg:
-    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn}:
+    case K.Config{+h, +p, +b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       IO.bind(Res(Creds), Res(N.Tls), Creds.load(cfg), cr => Conn.send_on.creds(s, h, p, b, req, cr))
 
 def Http.got_any(r: H.Resp) -> Bool:
@@ -614,14 +615,56 @@ def Limit.start(+qps: U32, +burst: U32) -> IO(Chan(Unit)):
           U32.max(burst, 1), 0)),
         u2 => IO.pure(Chan(Unit), ch))))
 
+def Fence.check.late(late: Bool) -> IO(Unit):
+  match late:
+    case True{}:
+      IO.die(Unit, 1, "bend-kube: leader lease past its renew deadline; exiting before the request leaves")
+    case False{}:
+      IO.pure(Unit, Unit{})
+
+# The leadership fence: a reading of the lease's last renewal. Under leader
+# election every controller request checks it, and a lease past its renew
+# deadline exits the process before the request leaves: whatever delays
+# the leader loop (a long computation on the shared event loop), no write
+# goes out after a standby may have taken over.
+def Fence.check.at(f: Maybe<&1, K.Fence>, +now: U32) -> IO(Unit):
+  match f:
+    case Some{K.Fence{+last, +deadline}}:
+      Fence.check.late(E.Lease.late(now, last, deadline))
+    case None{}:
+      IO.pure(Unit, Unit{})
+
+def Fence.mono() -> IO(U32):
+  IO.bind(Nat, U32, IO.now(), n => IO.pure(U32, U32.from_nat(n)))
+
+def Fence.peek(p: Poll<&1, &1, Maybe<&1, K.Fence>, Unit>, +ch: Chan(K.Fence)) -> IO(Unit):
+  match p:
+    case Ready{Some{+f}}:
+      IO.bind(Poll<&1, &1, Result<&1, &1, K.Fence, Unit>, K.Fence>, Unit, Chan.try_send(K.Fence, ch, f, 0),
+        u => IO.bind(U32, Unit, Fence.mono(), now => Fence.check.at(Some{f}, now)))
+    case _:
+      # another request holds the reading for a moment, or none is set yet
+      IO.pure(Unit, Unit{})
+
+def Fence.check(m: Maybe<&2, Chan(K.Fence)>) -> IO(Unit):
+  match m:
+    case Some{+ch}:
+      IO.bind(Poll<&1, &1, Maybe<&1, K.Fence>, Unit>, Unit, Chan.try_recv(K.Fence, ch, 0), p => Fence.peek(p, ch))
+    case None{}:
+      IO.pure(Unit, Unit{})
+
+def Client.send.go(+cfg: K.Config, req: H.Req) -> IO(Result<&2, &2, KErr, Reply>):
+  IO.bind(Unit, Result<&2, &2, KErr, Reply>, Fence.check(K.Config.fence(cfg)),
+    u => Client.send.with(cfg, req, K.Config.pool(cfg)))
+
 def Client.send.gate(+cfg: K.Config, req: H.Req, m: Maybe<&2, Chan(Unit)>) ->
   IO(Result<&2, &2, KErr, Reply>):
   match m:
     case Some{ch}:
       IO.bind(Maybe<&1, Unit>, Result<&2, &2, KErr, Reply>, Chan.recv(Unit, ch),
-        u => Client.send.with(cfg, req, K.Config.pool(cfg)))
+        u => Client.send.go(cfg, req))
     case None{}:
-      Client.send.with(cfg, req, K.Config.pool(cfg))
+      Client.send.go(cfg, req)
 
 # Sends a request and reads the whole reply, whatever its status, after
 # taking a token when the config has a rate limit.

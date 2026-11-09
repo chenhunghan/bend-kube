@@ -184,8 +184,8 @@ transforms kube-rs and controller-runtime users apply by hand.
   `Cl.KErr.action(e)` picks for it. It answers `RetryIn` with the delay the
   server named, and `Retry` otherwise. The delay is the Status body's
   `details.retryAfterSeconds`, else the `Retry-After` header (in seconds,
-  so a proxy's plain 429 counts too), capped at 1000s like the key's own
-  backoff; `Cl.KErr.retry_after` exposes it. Both are logged as
+  so a proxy's plain 429 counts too), kept between 1s and 1000s like the
+  key's own backoff; `Cl.KErr.retry_after` exposes it. Both are logged as
   warnings with the key and count as errors. `Hold{ms}` means "not done
   yet, look again after ms" and isn't an error. `Cl.KErr` has
   `is_conflict`, `is_not_found`, `is_already_exists` and `is_throttled`.
@@ -265,9 +265,17 @@ deadline):
   stops once the deadline is reached, whatever the retry period.
 - After a success it also naps no further than the deadline. A write that
   lands past the deadline stops the process rather than starting or
-  continuing work; an acquisition counts from the start of the attempt that
-  won it. Together with `deadline < duration`, this means a leader always
-  stops before a standby can judge its Lease expired.
+  continuing work; an acquisition counts from when its read returned,
+  before the winning write. Together with the startup rule that the lease
+  outlasts the deadline by at least a second, a leader always stops before
+  a standby can judge its Lease expired.
+- **Leadership fence.** The leader loop shares Bend's event loop with every
+  reconcile, so a long computation could delay its checks. The controllers'
+  client therefore checks a fence before every request: a reading of the
+  last renewal that the leader moves after each success. A request found
+  past the renew deadline exits the process before it leaves, so no write
+  goes out after a standby may have taken over, however the loop is
+  scheduled.
 - A Lease is observed when its read returns, and another holder's Lease
   lasts its own `leaseDurationSeconds`, so a slow read or a contender
   configured with a shorter duration can't expire a live leader.
@@ -281,9 +289,10 @@ deadline):
   status 0, so failover takes milliseconds after the drain. The release
   reads the Lease afresh and retries if a renewal raced it (a 409), up to
   three times within 4s, and logs the outcome.
-- Election timing is checked at startup, as client-go checks it. Every
-  setting must be above zero, the lease must outlast the renew deadline,
-  and the deadline must exceed 1.2 retry periods. Unsafe timing stops the
+- Election timing is checked at startup, as client-go checks it, plus a
+  margin. Every setting must be above zero, the lease must outlast the
+  renew deadline by at least a second, and the deadline must exceed 1.2
+  retry periods. Unsafe timing stops the
   process with the reason.
 - `Opts.with_election(o, ns, name)` names each replica by its pod
   (`HOSTNAME`) plus a random suffix. Two replicas can't share an identity,
@@ -440,7 +449,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 63 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 64 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**

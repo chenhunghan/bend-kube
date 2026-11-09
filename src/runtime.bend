@@ -946,7 +946,8 @@ def Ctl.report(+key: String, +kind: String, a: Q.Action) -> IO(Unit):
     case _:
       IO.pure(Unit, Unit{})
 
-# The monotonic clock in ms (since boot, never stepped): requeue deadlines
+# The monotonic clock in ms (never stepped; it wraps every 49.7 days, which
+# the wrapped subtractions handle): requeue deadlines
 # and reconcile durations are measured by it.
 def Ctl.mono() -> IO(U32):
   IO.bind(Nat, U32, IO.now(), n => IO.pure(U32, U32.from_nat(n)))
