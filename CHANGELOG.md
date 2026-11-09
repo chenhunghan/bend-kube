@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/chenhunghan/bend-kube/compare/v0.5.2...v0.5.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* leader election stops before a standby can take over, on every path ([#15](https://github.com/chenhunghan/bend-kube/issues/15)) ([5627b57](https://github.com/chenhunghan/bend-kube/commit/5627b57c110c1aea11c767b877a6cbad28f68653))
+
 ## [0.5.2](https://github.com/chenhunghan/bend-kube/compare/v0.5.1...v0.5.2) (2026-11-07)
 
 
