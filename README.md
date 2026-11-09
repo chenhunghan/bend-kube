@@ -505,8 +505,9 @@ loop.
   - unchanged past its duration, it can be taken;
   - our own Lease is renewed, and a released one is free.
   - another holder's Lease lasts its own recorded duration;
-  - the default timing is accepted, and a lease no longer than its renew
-    deadline is refused;
+  - the default timing is accepted; a lease no longer than its renew
+    deadline is refused, and so is one that outlasts it by less than a
+    second;
   - a leader is late once its deadline is reached, and never naps past it;
   - a write that lands past the deadline is overdue: a leader counts from
     its last renewal, an acquisition from the start of its attempt.
@@ -638,17 +639,27 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
     status writes over 20s, and a spec change reconciling again;
   - SIGTERM waiting for a running reconcile, then exiting 0, with and
     without leader election (the Lease is released after the drain);
-  - the rate limit: 13 requests at 4 qps with a burst of 2 took 2.77s.
+  - the rate limit: 13 requests at 4 qps with a burst of 2 took 2.77s;
   - two replicas: one leader, the standby waiting, and SIGTERM handing
-    the Lease to the standby within seconds (also in `tests/e2e.sh`).
+    the Lease to the standby within seconds (also in `tests/e2e.sh`);
+  - a leader frozen (SIGSTOP) past its renew deadline while its Website
+    changed: on resume it exits without writing, and the Deployment keeps
+    its old replica count;
+  - a one-hour soak on kind of `examples/bundle.bend`:
+    - 200 bundles under continuous churn (Secret changes, bundles deleted
+      and recreated, outputs deleted): 51,045 operations;
+    - 62,933 reconciles with zero errors, and every bundle correct at the
+      end;
+    - memory flat at about 31–36 MB after warm-up;
+    - a clean drain on SIGTERM.
 
 ## Scope
 
 - **Memory.** Bend strings are lists of characters, so a cached object
   takes many times its JSON size: a 0.6 KB ConfigMap takes about 10 KB.
-  That came to 204 MB RSS for 20,000 of them. Size memory limits by the objects a controller caches,
-  and narrow its watches with namespaces (`C.InNs`) and label selectors
-  (`X.Spec.label`, `X.Spec.watches_where`).
+  That came to 204 MB RSS for 20,000 of them. Size memory limits by the
+  objects a controller caches, and narrow its watches with namespaces
+  (`C.InNs`) and label selectors (`X.Spec.label`, `X.Spec.watches_where`).
 - **Relist peak.** A relist builds the new cache beside the old one and
   swaps it in whole, so for a moment the process holds about twice the
   cache.
