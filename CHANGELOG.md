@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.4](https://github.com/chenhunghan/bend-kube/compare/v0.5.3...v0.5.4) (2026-11-09)
+
+
+### Bug Fixes
+
+* leadership fence on every controller request ([#17](https://github.com/chenhunghan/bend-kube/issues/17)) ([888c8e2](https://github.com/chenhunghan/bend-kube/commit/888c8e20b90a0e2ccd69e75f50ff71c54ff7598d))
+
 ## [0.5.3](https://github.com/chenhunghan/bend-kube/compare/v0.5.2...v0.5.3) (2026-11-09)
 
 
