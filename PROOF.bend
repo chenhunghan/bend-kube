@@ -224,3 +224,9 @@ def Laws.leader_late_at_deadline():
 
 def Laws.leader_nap_bounded():
   {==}
+
+def Laws.acquisition_overdue_stops():
+  {==}
+
+def Laws.renewal_overdue_from_last():
+  {==}

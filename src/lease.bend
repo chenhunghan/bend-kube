@@ -236,3 +236,14 @@ def Lease.nap(+now: U32, +last: U32, +deadline: U32, +retry: U32, leading: Bool)
 # counts: a standby may act from then on).
 def Lease.late(+now: U32, +last: U32, +deadline: U32) -> Bool:
   U32.is_ge((now - last : U32), deadline)
+
+# Whether a write that just succeeded came too late to act on: a leader
+# counts from its last renewal (last), a candidate from the start of the
+# attempt that won (attempt). Past the renew deadline, a standby may
+# already judge the lease expired, so the writer must stop, not start.
+def Lease.overdue(+now: U32, +last: U32, +attempt: U32, +deadline: U32, leading: Bool) -> Bool:
+  match leading:
+    case True{}:
+      Lease.late(now, last, deadline)
+    case False{}:
+      Lease.late(now, attempt, deadline)
