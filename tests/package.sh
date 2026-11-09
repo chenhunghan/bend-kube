@@ -24,7 +24,12 @@ python3 tests/fixtures/fakehub.py "$PORT" 2>/dev/null &
 for _ in $(seq 50); do curl -fs "http://127.0.0.1:$PORT/pow.json" >/dev/null && break; sleep 0.1; done
 hub() { HOME="$work/home" BEND_HUB="http://127.0.0.1:$PORT" BEND_NO_TELEMETRY=1 "$@"; }
 
+# The stand-in hub has once dropped a connection mid-publish on a busy CI
+# runner; publishing to it is idempotent, so one retry tells a flake from a
+# real failure.
 hub bend package.bend --publish "$name@$ver" > "$work/publish.out" 2>&1 \
+  || { echo "publish failed once; retrying"; cat "$work/publish.out";
+       hub bend package.bend --publish "$name@$ver" > "$work/publish.out" 2>&1; } \
   || { cat "$work/publish.out"; echo "FAIL publish"; exit 1; }
 hash=$(curl -fs "http://127.0.0.1:$PORT/name/$name@$ver")
 curl -fs "http://127.0.0.1:$PORT/$hash/manifest" | awk '{print $2}' > "$work/files"

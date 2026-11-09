@@ -117,17 +117,14 @@ def Leader.started(leading: Bool, start: Maybe<&1, IO(Unit)>) -> IO(Unit):
 def Leader.lost() -> IO(Unit):
   IO.bind(Unit, Unit, L.Log.error("leader lease lost; exiting", Nil{}), u => IO.exit(1))
 
-def Leader.fence.put(p: Poll<&1, &1, Maybe<&1, K.Fence>, Unit>, +ch: Chan(K.Fence), +f: K.Fence) -> IO(Unit):
-  IO.bind(Poll<&1, &1, Result<&1, &1, K.Fence, Unit>, K.Fence>, Unit, Chan.try_send(K.Fence, ch, f, 0),
-    u => IO.pure(Unit, Unit{}))
-
-# Moves the leadership fence (K.Config.fence) to a renewal: the controllers'
-# requests check it, so none leaves once this renewal is past the deadline.
-def Leader.fence(m: Maybe<&2, Chan(K.Fence)>, +f: K.Fence) -> IO(Unit):
+# Moves the leadership fence (K.Config.fence) to a renewal: every write of
+# the controllers' requests asks the fence keeper first, so none leaves once
+# this renewal is past the deadline.
+def Leader.fence(m: Maybe<&2, Chan(K.FenceMsg)>, +f: K.Fence) -> IO(Unit):
   match m:
-    case Some{+ch}:
-      IO.bind(Poll<&1, &1, Maybe<&1, K.Fence>, Unit>, Unit, Chan.try_recv(K.Fence, ch, 0),
-        p => Leader.fence.put(p, ch, f))
+    case Some{ch}:
+      IO.bind(Result<&1, &1, K.FenceMsg, Unit>, Unit, Chan.send(K.FenceMsg, ch, K.FSet{f}),
+        u => IO.pure(Unit, Unit{}))
     case None{}:
       IO.pure(Unit, Unit{})
 

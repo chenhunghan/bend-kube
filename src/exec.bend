@@ -317,14 +317,16 @@ def Exec.input(+text: String, +k: U32) -> List<&2, U32>:
   List.append(&2, U32, W.Ws.frame(W.Ws.binary(), Con{0, U.Utf8.encode(text)}, k),
     W.Ws.frame(W.Ws.binary(), [255, 0], U32.xor(k, 1515870810)))
 
-def Exec.upgraded(s: Socket, rest: List<&2, U32>, stdin: Maybe<&2, String>, +k: U32, +ms: U32) ->
-  IO(Result<&2, &2, Cl.KErr, Out>):
+def Exec.upgraded(s: Socket, rest: List<&2, U32>, stdin: Maybe<&2, String>, +k: U32, +ms: U32,
+  fc: Maybe<&2, Chan(K.FenceMsg)>) -> IO(Result<&2, &2, Cl.KErr, Out>):
   match stdin:
     case None{}:
       Exec.listen(s, rest, ms)
     case Some{text}:
-      IO.bind(Socket & Result<&1, &1, U32 & String, Unit>, Result<&2, &2, Cl.KErr, Out>,
-        N.Tls.send_bytes(s, Exec.input(text, k), ms), p => Exec.sent(p, rest, ms))
+      # the input is a write like any request's: the leadership fence first
+      IO.bind(Unit, Result<&2, &2, Cl.KErr, Out>, Cl.Fence.check(fc),
+        u => IO.bind(Socket & Result<&1, &1, U32 & String, Unit>, Result<&2, &2, Cl.KErr, Out>,
+          N.Tls.send_bytes(s, Exec.input(text, k), ms), p => Exec.sent(p, rest, ms)))
 
 def Exec.message(+text: String, j: Result<&2, &2, String, J.Json>) -> String:
   match j:
@@ -340,37 +342,38 @@ def Exec.refused(+code: U32, reason: String, +rest: List<&2, U32>) -> Cl.KErr:
     Exec.message(String.trim(U.Utf8.decode_all(rest)), J.Json.parse(U.Utf8.decode_all(rest)))}}
 
 def Exec.answer.go(s: Socket, +code: U32, reason: String, rest: List<&2, U32>,
-  stdin: Maybe<&2, String>, +k: U32, +ms: U32, up: Bool) -> IO(Result<&2, &2, Cl.KErr, Out>):
+  stdin: Maybe<&2, String>, +k: U32, +ms: U32, fc: Maybe<&2, Chan(K.FenceMsg)>, up: Bool) ->
+  IO(Result<&2, &2, Cl.KErr, Out>):
   match up:
     case True{}:
-      Exec.upgraded(s, rest, stdin, k, ms)
+      Exec.upgraded(s, rest, stdin, k, ms, fc)
     case False{}:
       Exec.close((s, Fail{Exec.refused(code, reason, rest)}))
 
 def Exec.answer(s: Socket, h: Maybe<&2, H.Head>, rest: List<&2, U32>, stdin: Maybe<&2, String>,
-  +k: U32, +ms: U32) -> IO(Result<&2, &2, Cl.KErr, Out>):
+  +k: U32, +ms: U32, fc: Maybe<&2, Chan(K.FenceMsg)>) -> IO(Result<&2, &2, Cl.KErr, Out>):
   match h:
     case Some{H.Head{+code, reason, hs}}:
-      Exec.answer.go(s, code, reason, rest, stdin, k, ms, U32.is_eq(code, 101))
+      Exec.answer.go(s, code, reason, rest, stdin, k, ms, fc, U32.is_eq(code, 101))
     case None{}:
       Exec.close((s, Fail{Cl.KNet{0, "exec: a malformed answer to the upgrade"}}))
 
 def Exec.headed(p: Socket & Result<&2, &2, Cl.KErr, Scan>, stdin: Maybe<&2, String>, +k: U32,
-  +ms: U32) -> IO(Result<&2, &2, Cl.KErr, Out>):
+  +ms: U32, fc: Maybe<&2, Chan(K.FenceMsg)>) -> IO(Result<&2, &2, Cl.KErr, Out>):
   match p:
     case (s, Done{Scan{head, m, rest, f}}):
       Exec.answer(s, H.Http.parse_head(U.Utf8.decode_all(List.reverse(&2, U32, head))), rest,
-        stdin, k, ms)
+        stdin, k, ms, fc)
     case (s, Fail{e}):
       Exec.close((s, Fail{e}))
 
 def Exec.opened(t: Result<&1, &1, U32 & String, N.Tls>, stdin: Maybe<&2, String>, +k: U32,
-  +ms: U32) -> IO(Result<&2, &2, Cl.KErr, Out>):
+  +ms: U32, fc: Maybe<&2, Chan(K.FenceMsg)>) -> IO(Result<&2, &2, Cl.KErr, Out>):
   match t:
     case Done{N.Tls{s}}:
       IO.bind(Socket & Result<&2, &2, Cl.KErr, Scan>, Result<&2, &2, Cl.KErr, Out>,
         Exec.head(4096n, HChk{s, False{}, False{}}, Scan{Nil{}, 0, Nil{}, False{}}, ms),
-        p => Exec.headed(p, stdin, k, ms))
+        p => Exec.headed(p, stdin, k, ms, fc))
     case Fail{(c, m)}:
       IO.pure(Result<&2, &2, Cl.KErr, Out>, Fail{Cl.KNet{c, m}})
 
@@ -379,7 +382,7 @@ def Exec.keyed(+cfg: K.Config, path: String, stdin: Maybe<&2, String>, +ms: U32,
   match r:
     case Done{+k}:
       IO.bind(Result<&1, &1, U32 & String, N.Tls>, Result<&2, &2, Cl.KErr, Out>,
-        Cl.Conn.open(cfg, Exec.req(path, k), False{}), t => Exec.opened(t, stdin, k, ms))
+        Cl.Conn.open(cfg, Exec.req(path, k), False{}), t => Exec.opened(t, stdin, k, ms, K.Config.fence(cfg)))
     case Fail{(c, m)}:
       IO.pure(Result<&2, &2, Cl.KErr, Out>, Fail{Cl.KNet{c, "exec: no random key: " ++ m}})
 
