@@ -97,7 +97,8 @@ def Leader.timed(+ms: U32, act: IO(Result<&2, &2, Cl.KErr, J.Json>)) -> IO(Resul
     IO.within(Result<&2, &2, Cl.KErr, J.Json>, ms, act),
     m => IO.pure(Result<&2, &2, Cl.KErr, J.Json>, Leader.timed.of(m)))
 
-# The monotonic clock in ms (time since boot, never stepped): every timing
+# The monotonic clock in ms (never stepped; wrapped subtraction handles its
+# 49.7-day wrap): every timing
 # decision (expiry, the renew deadline, lateness) uses it; the wall clock
 # only stamps the Lease.
 def Leader.mono() -> IO(U32):
@@ -115,6 +116,20 @@ def Leader.started(leading: Bool, start: Maybe<&1, IO(Unit)>) -> IO(Unit):
 # candidate that fails just tries again).
 def Leader.lost() -> IO(Unit):
   IO.bind(Unit, Unit, L.Log.error("leader lease lost; exiting", Nil{}), u => IO.exit(1))
+
+def Leader.fence.put(p: Poll<&1, &1, Maybe<&1, K.Fence>, Unit>, +ch: Chan(K.Fence), +f: K.Fence) -> IO(Unit):
+  IO.bind(Poll<&1, &1, Result<&1, &1, K.Fence, Unit>, K.Fence>, Unit, Chan.try_send(K.Fence, ch, f, 0),
+    u => IO.pure(Unit, Unit{}))
+
+# Moves the leadership fence (K.Config.fence) to a renewal: the controllers'
+# requests check it, so none leaves once this renewal is past the deadline.
+def Leader.fence(m: Maybe<&2, Chan(K.Fence)>, +f: K.Fence) -> IO(Unit):
+  match m:
+    case Some{+ch}:
+      IO.bind(Poll<&1, &1, Maybe<&1, K.Fence>, Unit>, Unit, Chan.try_recv(K.Fence, ch, 0),
+        p => Leader.fence.put(p, ch, f))
+    case None{}:
+      IO.pure(Unit, Unit{})
 
 # A leader's renewal that landed only after the renew deadline counts as
 # lost (client-go's RenewDeadline): a standby may already have judged the
@@ -175,13 +190,15 @@ def Leader.run(outer: Nat, fuel: Nat, ev: LEv, +cfg: K.Config, +o: LOpts, +obs: 
           cfg, o, obs, leading, last, start))
     case oc 1n+f LWrote{+now, True{}, late}:
       # a write that landed too late (a slow acquisition or renewal) stops
-      # the process rather than starting or continuing work
+      # the process rather than starting or continuing work; otherwise the
+      # fence moves to this renewal before any work goes on
       Leader.renewed(late,
-        IO.bind(Unit, Unit, Leader.started(leading, start),
+        IO.bind(Unit, Unit, Leader.fence(K.Config.fence(cfg), K.Fence{now, LOpts.deadline(o)}),
+          u0 => IO.bind(Unit, Unit, Leader.started(leading, start),
           u => IO.bind(U32, Unit, Leader.mono(),
             m3 => IO.bind(Unit, Unit,
               IO.sleep(E.Lease.nap(m3, now, LOpts.deadline(o), LOpts.retry(o), True{})),
-              u2 => Leader.run(oc, f, LTry{}, cfg, o, obs, True{}, now, None{})))))
+              u2 => Leader.run(oc, f, LTry{}, cfg, o, obs, True{}, now, None{}))))))
     case oc 1n+f LWrote{now, False{}, late}:
       Leader.run(oc, f, LFail{Bool.and(leading, late)}, cfg, o, obs, leading, last, start)
     case oc 1n+f LFail{True{}}:

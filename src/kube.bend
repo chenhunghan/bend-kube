@@ -181,9 +181,35 @@ def Kube.rate(o: Opts, +cfg: K.Config) -> IO(K.Config):
     case Opts{m, p, l, s, g, +q, b}:
       Kube.limited(cfg, q, b, U32.is_eq(q, 0))
 
+def Opts.elects(o: Opts) -> Bool:
+  match o:
+    case Opts{m, p, Some{l}, s, g, q, b}:
+      True{}
+    case _:
+      False{}
+
+def Kube.fenced(+cfg: K.Config, m: Maybe<&2, Chan(K.Fence)>) -> K.Config:
+  match m:
+    case Some{ch}:
+      K.Config.with_fence(cfg, ch)
+    case None{}:
+      cfg
+
+# Under leader election, a leadership fence shared by the controllers'
+# config and the election's (Leader.fence, Fence.check in client.bend).
+def Kube.fence(on: Bool) -> IO(Maybe<&2, Chan(K.Fence)>):
+  match on:
+    case True{}:
+      IO.bind(Chan(K.Fence), Maybe<&2, Chan(K.Fence)>, Chan.new(K.Fence, 1),
+        ch => IO.pure(Maybe<&2, Chan(K.Fence)>, Some{ch}))
+    case False{}:
+      IO.pure(Maybe<&2, Chan(K.Fence)>, None{})
+
 def Kube.pooled(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, specs: List<&2, X.Spec>,
   +o: Opts) -> IO(Unit):
-  IO.bind(K.Config, Unit, Kube.rate(o, cfg), cfg2 => Kube.start(~rec, cfg2, cfg, specs, o))
+  IO.bind(Maybe<&2, Chan(K.Fence)>, Unit, Kube.fence(Opts.elects(o)),
+    +fc => IO.bind(K.Config, Unit, Kube.rate(o, cfg),
+      cfg2 => Kube.start(~rec, Kube.fenced(cfg2, fc), Kube.fenced(cfg, fc), specs, o)))
 
 # Runs controllers against a given config (another cluster, a test
 # server); Kube.control_all infers it. The config gets a connection pool

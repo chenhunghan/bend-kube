@@ -26,21 +26,29 @@ type Src is Data:
 # server_name: the name the server's certificate must carry, and the SNI
 # sent, when it differs from host (kubeconfig's tls-server-name; "" for
 # host).
+# fence: the leadership fence (leader.bend): when the controllers run under
+# leader election, each request first checks that the lease is still
+# within its renew deadline, and the process exits if it is not.
 # limit: the client's rate limit, a bucket of tokens a request takes one of
 # (client.bend's Limit), when the program made one (Config.with_limit).
+# The leadership fence's reading: the monotonic time of the last renewal
+# and the renew deadline (ms); past last + deadline a standby may act.
+type Fence is Data:
+  Fence{last: U32, deadline: U32}
+
 type Config is Data:
   Config{host: String, port: U32, base: String, ca: Src, cert: Src, key: Src, token: Src,
     namespace: String, pool: Maybe<&2, Chan(Socket)>, limit: Maybe<&2, Chan(Unit)>,
-    server_name: String}
+    server_name: String, fence: Maybe<&2, Chan(Fence)>}
 
 def Config.host(c: Config) -> String:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       h
 
 def Config.namespace(c: Config) -> String:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       ns
 
 # Server URLs
@@ -218,7 +226,7 @@ def Kube.config.fin(u: Url, ca: Src, cert: Src, key: Src, tok: Src, ns: String, 
   Result<&2, &2, String, Config>:
   match u:
     case Url{h, p, b}:
-      Done{Config{h, p, b, ca, cert, key, tok, ns, None{}, None{}, sn}}
+      Done{Config{h, p, b, ca, cert, key, tok, ns, None{}, None{}, sn, None{}}}
 
 def Kube.config.server(s: J.Json, ca: Src, cert: Src, key: Src, tok: Src, ns: String, sn: String) ->
   Result<&2, &2, String, Config>:
@@ -264,7 +272,7 @@ def InCluster.dir() -> String:
 # (client-go's InClusterConfig). An IPv6 host needs no brackets here.
 def InCluster.config(host: String, port: String, ns: String) -> Config:
   Config{host, Url.port(port, 443), "", FromFile{InCluster.dir() ++ "/ca.crt"}, NoSrc{}, NoSrc{},
-    FromFile{InCluster.dir() ++ "/token"}, String.trim(ns), None{}, None{}, ""}
+    FromFile{InCluster.dir() ++ "/token"}, String.trim(ns), None{}, None{}, "", None{}}
 
 # Merging and paths
 # -----------------
@@ -373,31 +381,43 @@ def Kube.dir(+p: String) -> String:
 
 def Config.with_pool(c: Config, pool: Chan(Socket)) -> Config:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
-      Config{h, p, b, ca, cert, key, tok, ns, Some{pool}, lm, sn}
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      Config{h, p, b, ca, cert, key, tok, ns, Some{pool}, lm, sn, fc}
 
 def Config.pool(c: Config) -> Maybe<&2, Chan(Socket)>:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       pl
 
 def Config.with_limit(c: Config, limit: Chan(Unit)) -> Config:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
-      Config{h, p, b, ca, cert, key, tok, ns, pl, Some{limit}, sn}
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      Config{h, p, b, ca, cert, key, tok, ns, pl, Some{limit}, sn, fc}
 
 def Config.limit(c: Config) -> Maybe<&2, Chan(Unit)>:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       lm
 
 def Config.server_name(c: Config) -> String:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       sn
 
 # The config with the name the server's certificate must carry.
 def Config.with_server_name(c: Config, name: String) -> Config:
   match c:
-    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn}:
-      Config{h, p, b, ca, cert, key, tok, ns, pl, lm, name}
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      Config{h, p, b, ca, cert, key, tok, ns, pl, lm, name, fc}
+
+def Config.fence(c: Config) -> Maybe<&2, Chan(Fence)>:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      fc
+
+# The config with a leadership fence (Kube.start sets it for the
+# controllers when they run under leader election).
+def Config.with_fence(c: Config, f: Chan(Fence)) -> Config:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, Some{f}}

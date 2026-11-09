@@ -510,7 +510,13 @@ law lease_default_timing_ok:
 
 law lease_short_lease_refused:
   {E.Lease.timing(5, 10000, 2000)
-    == Some{"leader election: the lease duration must be longer than the renew deadline"} : Maybe<&2, String>}
+    == Some{"leader election: the lease duration must exceed the renew deadline by at least a second"} : Maybe<&2, String>}
+
+# A lease that outlasts its deadline by less than a second leaves too little
+# slack between a leader stopping and a standby starting: refused.
+law lease_thin_margin_refused:
+  {E.Lease.timing(15, 14500, 2000)
+    == Some{"leader election: the lease duration must exceed the renew deadline by at least a second"} : Maybe<&2, String>}
 
 # A leader is late from the moment its renew deadline is reached, and it
 # never sleeps past it: after 9.9s of a 10s deadline it naps at most 0.1s,
