@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.5](https://github.com/chenhunghan/bend-kube/compare/v0.5.4...v0.5.5) (2026-11-09)
+
+
+### Bug Fixes
+
+* fence every write of request bytes, through a keeper that always answers ([#19](https://github.com/chenhunghan/bend-kube/issues/19)) ([5be605f](https://github.com/chenhunghan/bend-kube/commit/5be605f8aeaa41a4170203821427599c33a96290))
+
 ## [0.5.4](https://github.com/chenhunghan/bend-kube/compare/v0.5.3...v0.5.4) (2026-11-09)
 
 
