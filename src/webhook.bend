@@ -25,8 +25,8 @@ import ./log.bend as L
 #
 # The certificate and key are PEM files, read again for every connection,
 # so a rotated certificate (cert-manager's) is served without a restart.
-# Each connection is served on its own computation, reads at most 16 MiB
-# within 10s, and is closed after one answer. Webhooks answer on every
+# Each connection is served on its own computation, reads at most 16 MiB,
+# waits at most 10s for each read, and is closed after one answer. Webhooks answer on every
 # replica, leader or not: start the server before Kube.control (IO.spawn),
 # not inside it. Native lane only (Tls.accept).
 

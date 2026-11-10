@@ -168,8 +168,11 @@ python3 -I -c "import socket; s = socket.create_connection(('127.0.0.1', 24420))
 ok=0; for i in $(seq 1 20); do (review "c$i" plain | post | grep -q "\"uid\":\"c$i\",\"allowed\":true" && touch "$work/wh-ok-$i") & done; wait_n=0
 for _ in $(seq 1 100); do [ "$(ls "$work" | grep -c '^wh-ok-')" = 20 ] && break; sleep 0.1; done
 [ "$(ls "$work" | grep -c '^wh-ok-')" = 20 ] && pass "native: 20 clients at once, each answered" || fail "native: concurrent: $(ls "$work" | grep -c '^wh-ok-')/20"
+# The sanitized -O0 build is slow on a large body (the optimized one takes
+# about a second for 2 MB), so this client waits longer.
 python3 -I -c "import json; print(json.dumps({'apiVersion':'admission.k8s.io/v1','kind':'AdmissionReview','request':{'uid':'big','object':{'data':{'k':'x'*2000000}}}}))" \
-  | post | grep -q '"uid":"big","allowed":true' && pass "native: a 2 MB review" || fail "native: big review"
+  | curl -s -m 120 --cacert $W/ca.crt --resolve bend.test:24420:127.0.0.1 https://bend.test:24420/validate --data-binary @- \
+  | grep -q '"uid":"big","allowed":true' && pass "native: a 2 MB review" || fail "native: big review"
 kill "$wh_pid"; wait "$wh_pid" 2>/dev/null || true
 if grep -E "ERROR: AddressSanitizer|runtime error" "$work/webhook.log" >/dev/null; then
   fail "native: webhook: sanitizer report"; grep -v WARNING "$work/webhook.log" | head -30

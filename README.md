@@ -512,7 +512,9 @@ admission only.
 - `cert` and `key` are PEM file paths (a mounted Secret, such as
   cert-manager's `tls.crt` and `tls.key`). They are read for every
   connection, so a rotated certificate is served without a restart.
-- Each connection reads at most 16 MiB within 10s and gets one answer.
+- Each connection reads at most 16 MiB, waits at most 10s for each read,
+  and gets one answer. An optimized build answers a pod-sized review in
+  about 3 ms and a 2 MB one in about 1.2s.
   Webhooks answer on every replica: start the server with `IO.spawn` before
   `Kube.control`, not under leader election.
 - The server side of TLS (`Tls.accept`) runs on the native lane only.
