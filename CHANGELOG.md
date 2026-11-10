@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.0](https://github.com/chenhunghan/bend-kube/compare/v0.6.0...v0.7.0) (2026-11-10)
+
+
+### Features
+
+* a watchdog keeps reconcile timeouts, not a sleeper per reconcile ([f719ce2](https://github.com/chenhunghan/bend-kube/commit/f719ce23768bea6632aa8cbbeaf8b79743b80390))
+* one pool per cluster, the server in watch logs, Client.replace_retry ([8219fd2](https://github.com/chenhunghan/bend-kube/commit/8219fd2a29dfde4831614b2783a0a41d170712b5))
+* relations mapped by code (X.RMap, Kube.control_mapped) ([1a2786e](https://github.com/chenhunghan/bend-kube/commit/1a2786eddcb3d6e6ac15a9eef19ac5e85b955bdb))
+
 ## [0.6.0](https://github.com/chenhunghan/bend-kube/compare/v0.5.5...v0.6.0) (2026-11-10)
 
 
