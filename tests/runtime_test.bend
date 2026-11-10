@@ -269,6 +269,19 @@ def js.of(r: Result<&2, &2, String, J.Json>) -> J.Json:
 def kc(+ca: String) -> J.Json:
   js.of(J.Json.parse("{\"current-context\": \"c\", \"contexts\": [{\"name\": \"c\", \"context\": {\"cluster\": \"k\", \"user\": \"u\"}}], \"clusters\": [{\"name\": \"k\", \"cluster\": {\"server\": \"https://h:6443\"" ++ ca ++ "}}], \"users\": [{\"name\": \"u\", \"user\": {}}]}"))
 
+# n ConfigMaps, cm-n .. cm-1, as one list's outputs.
+def many(+n: Nat) -> List<&2, W.Out>:
+  match n:
+    case 0n:
+      [W.OInitDone{}]
+    case 1n+k:
+      W.OInitApply{cm("cm-" ++ Nat.show(n))} <> many(k)
+
+def njobs(r: R.CState & List<&2, R.Job>) -> String:
+  match r:
+    case (s, js):
+      Nat.show(List.length(&2, R.Job, js))
+
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
   # (their objects deleted), the third is live: dispatch must reach it.
@@ -329,3 +342,7 @@ def main() -> IO(Unit):
     IO.print(map_report(R.CCtx{kcfg("main"), mspec(), mch, sch, 0, mtr, None{}}))
     IO.print("kubeconfig CA: bad base64 " ++ ca_of(K.Kube.config(kc(", \"certificate-authority-data\": \"%%%\""), ""))
       ++ "; good " ++ ca_of(K.Kube.config(kc(", \"certificate-authority-data\": \"cGVt\""), "")) ++ "; none " ++ ca_of(K.Kube.config(kc(""), "")))
+    IO.print("one dispatch, 150 waiting, max 200: " ++ njobs(R.Ctl.dispatch(planned(msg(state(200), R.MOuts{0, W.OInit{} <> many(150n)}, 1000, 200))))
+      ++ " start; max 8: " ++ njobs(R.Ctl.dispatch(planned(msg(state(8), R.MOuts{0, W.OInit{} <> many(150n)}, 1000, 8)))))
+    IO.print("a requeue near 2^32 ms saturates: " ++ U32.show(R.Ctl.jitter(4294967295, Done{100})) ++ "; 1000 ms with x=50: "
+      ++ U32.show(R.Ctl.jitter(1000, Done{50})))

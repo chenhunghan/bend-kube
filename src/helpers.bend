@@ -79,10 +79,10 @@ def Fin.ctl.go(~apply: J.Json -> X.Ctx -> IO(Q.Action), ~cleanup: J.Json -> X.Ct
       apply(o, ctx)
     case F.FAdd{p}:
       IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Q.Action,
-        Cl.Client.patch(X.Ctx.cfg(ctx), api, C.Obj.name(o), C.PJson{}, p), Fin.added)
+        Cl.Client.patch(X.Ctx.cluster(ctx, 0), api, C.Obj.name(o), C.PJson{}, p), Fin.added)
     case F.FCleanup{p}:
       IO.bind(Q.Action, Q.Action, cleanup(o, ctx),
-        a => Fin.cleaned(X.Ctx.cfg(ctx), api, C.Obj.name(o), p, a))
+        a => Fin.cleaned(X.Ctx.cluster(ctx, 0), api, C.Obj.name(o), p, a))
     case F.FDone{}:
       IO.pure(Q.Action, Q.AwaitChange{})
 

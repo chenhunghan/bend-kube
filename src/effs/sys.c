@@ -109,6 +109,63 @@ static void __attribute__((constructor)) sys_listen_use(void) {
 }
 #endif
 
+// Sys.memo_get(key, now) / Sys.memo_put(key, value, until): a process-wide
+// table of short strings that expire (times in wall-clock seconds), for
+// what must outlive one request, such as an exec plugin's token. Effects
+// run on the loop thread, so the table needs no lock. A lookup of a key
+// that is missing or expired answers "".
+typedef struct SysMemo { char* key; char* val; u32 until; struct SysMemo* next; } SysMemo;
+static SysMemo* sys_memo;
+
+Term sys_memo_get_run(Env e, Term* f, IoWork* w) {
+  u64 n;
+  char* key = io_cstr(e, f[0], &n);
+  u32 now = (u32)f[1];
+  const char* got = "";
+  for (SysMemo* m = sys_memo; m != NULL; m = m->next) {
+    if (strcmp(m->key, key) == 0) {
+      got = now < m->until ? m->val : "";
+      break;
+    }
+  }
+  free(key);
+  return io_str(e, got, strlen(got));
+}
+
+Term sys_memo_put_run(Env e, Term* f, IoWork* w) {
+  u64 n;
+  char* key = io_cstr(e, f[0], &n);
+  char* val = io_cstr(e, f[1], &n);
+  for (SysMemo* m = sys_memo; m != NULL; m = m->next) {
+    if (strcmp(m->key, key) == 0) {
+      free(m->val);
+      free(key);
+      m->val = val;
+      m->until = (u32)f[2];
+      return term_pak(CID(Unit), 0);
+    }
+  }
+  SysMemo* m = io_mem(calloc(1, sizeof *m));
+  m->key = key;
+  m->val = val;
+  m->until = (u32)f[2];
+  m->next = sys_memo;
+  sys_memo = m;
+  return term_pak(CID(Unit), 0);
+}
+
+#ifdef CID(Sys.memo_get)
+static void __attribute__((constructor)) sys_memo_get_use(void) {
+  io_eff(CID(Sys.memo_get), sys_memo_get_run);
+}
+#endif
+
+#ifdef CID(Sys.memo_put)
+static void __attribute__((constructor)) sys_memo_put_use(void) {
+  io_eff(CID(Sys.memo_put), sys_memo_put_run);
+}
+#endif
+
 #ifdef CID(Sys.wall)
 static void __attribute__((constructor)) sys_wall_use(void) {
   io_eff(CID(Sys.wall), sys_wall_run);

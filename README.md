@@ -395,8 +395,9 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   ended, without `Connection: close`.
 - A stale pooled connection is retried once on a fresh one, by Go's
   transport rule: retry when the request was not written, or when no
-  response byte came and the method is GET, HEAD or PUT. A law states this
-  rule. Unlike Go, a DELETE is never replayed: if the first one landed and
+  response byte came and the method is GET or HEAD. A law states this
+  rule. A PUT or DELETE is never replayed: a PUT that landed would conflict
+  on its version, and if a DELETE landed and
   the name was recreated, a replay would delete the replacement.
 - 50 sequential GETs take 32ms pooled against 240ms with fresh
   connections.
@@ -412,8 +413,13 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   tokens can be inline, in a file, or from an exec plugin (EKS, GKE, AKS and
   OIDC plugins via `ExecCredential`). A plugin gets its `env` entries and
   `KUBERNETES_EXEC_INFO`.
-- Token files and plugins are read again on every connection, so rotated
-  service-account tokens are picked up.
+- Token files are read again on every request, so rotated service-account
+  tokens are picked up.
+- A plugin's token is cached for the process, per command and arguments,
+  until a minute before its `expirationTimestamp` (a minute when it gives
+  none), so the plugin runs once per token, not once per request. Before
+  0.9 it ran on every request. The runtime image has no cloud plugins
+  (`aws`, `gke-gcloud-auth-plugin`): add them to your own image.
 
 **TLS:**
 
@@ -548,7 +554,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 79 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 80 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -556,6 +562,8 @@ loop.
     once;
   - other errors back off and count the failure;
   - a watch that ends resumes from the same version;
+  - once a step of a batch backs off (a bad line), the rest of the batch
+    is not applied;
   - bookmarks move the version;
   - the last page emits InitDone and starts the watch;
   - the first page emits Init;
@@ -783,10 +791,12 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
   `AllNs` api has no namespace in its path.
 - **Finalizer RBAC.** Finalizers are written with JSON patches, so a
   controller using them needs `patch` on its primary.
-- **Relations scan.** `RRef` and `RAll` look through the primary's cache
-  for each related event, and `X.Ctx.children` looks through a related
-  cache. That is linear in the cache's size, which is fine for thousands of
-  objects.
+- **Relations index.** `RRef` and `RAll` index the primaries once per batch
+  of related events (by the names the field holds, and by namespace), so a
+  relist of 5,000 related objects against 5,000 primaries folds in about
+  70 ms natively. Before 0.9 each related object scanned every primary:
+  that relist took 76 s and blocked the loop the lease renews on.
+  `X.Ctx.children` still looks through a related cache, linear in its size.
 
 - **Webhook TLS.** The webhook server presents a certificate but asks for
   none, and speaks HTTP/1.1 only, as the API server does to webhooks. Prefer

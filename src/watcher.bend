@@ -186,9 +186,14 @@ def Watcher.merge(acc: Step, x: Input) -> Step:
     case Step{st, outs, w}:
       Watcher.merge.go(outs, w, Watcher.step(st, x))
 
+# Once a step asks to back off (a bad line, an error event), the rest of
+# the run is not fed: the driver reconnects from the version before it, so
+# the events after it come again rather than being applied past a gap.
 def Watcher.steps(xs: List<&2, Input>, acc: Step) -> Step:
-  match xs:
-    case Nil{}:
-      acc
-    case Con{x, t}:
-      Watcher.steps(t, Watcher.merge(acc, x))
+  match xs acc:
+    case _ Step{st, outs, True{}}:
+      Step{st, outs, True{}}
+    case Nil{} a:
+      a
+    case Con{x, t} a:
+      Watcher.steps(t, Watcher.merge(a, x))

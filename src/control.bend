@@ -99,7 +99,10 @@ def Pred.changed(+ps: List<&2, Pred>, old: Maybe<&2, J.Json>, +new: J.Json) -> B
       Bool.not(String.eq(Pred.print(ps, o), Pred.print(ps, new)))
 
 # Whether a change to the primary reconciles it: always without predicates;
-# with them, when what they see differs from the cached object.
+# with them, when what they see differs from the cached object. The new
+# object is compared as the cache holds it (S.Store.slim: no managedFields
+# or last-applied annotation), so a kubectl apply that changes nothing else
+# does not pass PAnnotations.
 def Pred.passes(ps: List<&2, Pred>, old: Maybe<&2, J.Json>, +new: J.Json) -> Bool:
   match ps:
     case Nil{}:
@@ -263,6 +266,153 @@ def Rel.keys(r: Rel, +res: C.Res, +o: J.Json, +prim: S.Store) -> List<&2, String
     case RMap{}:
       [Mapped.mark() ++ J.Json.show(o)]
 
+# Indexes for a batch
+# --------------------
+#
+# RRef and RAll would scan every cached primary for every related object,
+# so a relist of R related objects against P primaries cost P x R (seconds
+# at a few thousand of each, on the loop the lease renews on). A batch
+# instead builds an index of the primaries once: for RRef, the names each
+# primary's field holds; for RAll, the primaries by namespace. Lookups keep
+# the scan's order and its rule (Rel.near).
+
+# A primary as an index holds it: its key and namespace.
+type Ent is Data:
+  Ent{key: String, ns: String}
+
+# refs: name -> the primaries whose field names it; nss: namespace -> the
+# primaries in it ("" for cluster-scoped ones); prim: the cache, for the
+# other relations.
+type Ix is Data:
+  Ix{prim: S.Store, refs: Map<&2, List<&2, Ent>>, nss: Map<&2, List<&2, Ent>>}
+
+def Ix.put.got(r: Map<&2, List<&2, Ent>> & List<&2, Ent>, +k: String, +e: Ent) -> Map<&2, List<&2, Ent>>:
+  match r:
+    case (m, es):
+      Map.set(&2, List<&2, Ent>, m, k, e <> es)
+
+def Ix.put(+m: Map<&2, List<&2, Ent>>, +k: String, +e: Ent) -> Map<&2, List<&2, Ent>>:
+  Ix.put.got(Map.get(List<&2, Ent>, Nil{}, m, k), k, e)
+
+def Ix.get.got(r: Map<&2, List<&2, Ent>> & List<&2, Ent>) -> List<&2, Ent>:
+  match r:
+    case (m, es):
+      es
+
+def Ix.get(+m: Map<&2, List<&2, Ent>>, +k: String) -> List<&2, Ent>:
+  Ix.get.got(Map.get(List<&2, Ent>, Nil{}, m, k))
+
+# The names a field holds: the string itself, or each string of a list.
+def Ix.names.strs(xs: List<&2, J.Json>) -> List<&2, String>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case Con{J.JStr{s}, t}:
+      s <> Ix.names.strs(t)
+    case Con{x, t}:
+      Ix.names.strs(t)
+
+def Ix.names(v: J.Json) -> List<&2, String>:
+  match v:
+    case J.JStr{s}:
+      [s]
+    case J.JArr{xs}:
+      Ix.names.strs(J.Json.items(J.JArr{xs}))
+    case _:
+      Nil{}
+
+def Ix.refs.names(ns: List<&2, String>, +e: Ent, +m: Map<&2, List<&2, Ent>>) -> Map<&2, List<&2, Ent>>:
+  match ns:
+    case Nil{}:
+      m
+    case Con{n, t}:
+      Ix.refs.names(t, e, Ix.put(m, n, e))
+
+# Built from the primaries in reverse, so each list is in cache order.
+def Ix.refs.go(ps: List<&2, J.Json>, +path: List<&2, String>, +m: Map<&2, List<&2, Ent>>) ->
+  Map<&2, List<&2, Ent>>:
+  match ps:
+    case Nil{}:
+      m
+    case Con{+p, t}:
+      Ix.refs.go(t, path, Ix.refs.names(Ix.names(J.Json.at(p, path)), Ent{C.Obj.key(p), C.Obj.namespace(p)}, m))
+
+def Ix.nss.go(ps: List<&2, J.Json>, +m: Map<&2, List<&2, Ent>>) -> Map<&2, List<&2, Ent>>:
+  match ps:
+    case Nil{}:
+      m
+    case Con{+p, t}:
+      Ix.nss.go(t, Ix.put(m, C.Obj.namespace(p), Ent{C.Obj.key(p), C.Obj.namespace(p)}))
+
+# The index a relation needs, over the primaries' cache.
+def Ix.of(r: Rel, +prim: S.Store) -> Ix:
+  match r:
+    case RRef{path}:
+      Ix{prim, Ix.refs.go(List.reverse(&2, J.Json, S.Store.values(prim)), path, Map.new(&2, List<&2, Ent>)),
+        Map.new(&2, List<&2, Ent>)}
+    case RAll{}:
+      Ix{prim, Map.new(&2, List<&2, Ent>), Ix.nss.go(List.reverse(&2, J.Json, S.Store.values(prim)), Map.new(&2, List<&2, Ent>))}
+    case _:
+      Ix{prim, Map.new(&2, List<&2, Ent>), Map.new(&2, List<&2, Ent>)}
+
+def Ix.prim(ix: Ix) -> S.Store:
+  match ix:
+    case Ix{p, r, n}:
+      p
+
+def Ix.near.put(+k: String, hit: Bool, rest: List<&2, String>) -> List<&2, String>:
+  match hit:
+    case True{}:
+      k <> rest
+    case False{}:
+      rest
+
+# The entries near namespace ns (Rel.near's rule), as keys.
+def Ix.near(es: List<&2, Ent>, +ns: String) -> List<&2, String>:
+  match es:
+    case Nil{}:
+      Nil{}
+    case Con{Ent{+k, +pns}, t}:
+      Ix.near.put(k, Bool.or(Bool.or(String.is_empty(ns), String.is_empty(pns)), String.eq(pns, ns)), Ix.near(t, ns))
+
+def Ix.keys(es: List<&2, Ent>) -> List<&2, String>:
+  match es:
+    case Nil{}:
+      Nil{}
+    case Con{Ent{k, n}, t}:
+      k <> Ix.keys(t)
+
+# Every primary, in cache order.
+def Ix.every.go(ps: List<&2, J.Json>) -> List<&2, String>:
+  match ps:
+    case Nil{}:
+      Nil{}
+    case Con{+p, t}:
+      C.Obj.key(p) <> Ix.every.go(t)
+
+# RAll through the index: every primary for a cluster-scoped object; else
+# those in its namespace, and cluster-scoped ones (the primaries are one
+# resource, so only one of the two lists is ever non-empty).
+def Ix.every(prim: S.Store) -> List<&2, String>:
+  Ix.every.go(S.Store.values(prim))
+
+def Ix.all.go(ix: Ix, +ns: String, cluster: Bool) -> List<&2, String>:
+  match ix cluster:
+    case Ix{p, r, n} True{}:
+      Ix.every(p)
+    case Ix{p, r, +n} False{}:
+      List.append(&2, String, Ix.keys(Ix.get(n, ns)), Ix.keys(Ix.get(n, "")))
+
+# The primary keys a related object triggers, through the batch's index.
+def Rel.keys.ix(r: Rel, +res: C.Res, +o: J.Json, +ix: Ix) -> List<&2, String>:
+  match r ix:
+    case RRef{path} Ix{p, +refs, n}:
+      Ix.near(Ix.get(refs, C.Obj.name(o)), C.Obj.namespace(o))
+    case RAll{} x:
+      Ix.all.go(x, C.Obj.namespace(o), String.is_empty(C.Obj.namespace(o)))
+    case other x:
+      Rel.keys(other, res, o, Ix.prim(x))
+
 # Folding a watcher's outputs
 # ---------------------------
 
@@ -293,10 +443,10 @@ def Fold.prim.one(+ps: List<&2, Pred>, o: W.Out, f: Fold) -> Fold:
   match o f:
     case W.OApply{+x} Fold{+s, ks, g}:
       Fold{S.Store.apply(s, W.OApply{x}),
-        Fold.put(C.Obj.key(x), Pred.passes(ps, S.Store.get(s, C.Obj.key(x)), x), ks), g}
+        Fold.put(C.Obj.key(x), Pred.passes(ps, S.Store.get(s, C.Obj.key(x)), S.Store.slim(x)), ks), g}
     case W.OInitApply{+x} Fold{+s, ks, g}:
       Fold{S.Store.apply(s, W.OInitApply{x}),
-        Fold.put(C.Obj.key(x), Pred.passes(ps, S.Store.get(s, C.Obj.key(x)), x), ks), g}
+        Fold.put(C.Obj.key(x), Pred.passes(ps, S.Store.get(s, C.Obj.key(x)), S.Store.slim(x)), ks), g}
     case W.ODelete{+x} Fold{s, ks, g}:
       Fold{S.Store.apply(s, W.ODelete{x}), ks, C.Obj.key(x) <> g}
     case W.OInitDone{} Fold{+s, ks, g}:
@@ -315,21 +465,21 @@ def Fold.prim(+ps: List<&2, Pred>, outs: List<&2, W.Out>, f: Fold) -> Fold:
     case Con{o, t}:
       Fold.prim(ps, t, Fold.prim.one(ps, o, f))
 
-def Fold.rel.keys(+r: Rel, +res: C.Res, m: Maybe<&2, J.Json>, +prim: S.Store) ->
+def Fold.rel.keys(+r: Rel, +res: C.Res, m: Maybe<&2, J.Json>, +ix: Ix) ->
   List<&2, String>:
   match m:
     case Some{+x}:
-      Rel.keys(r, res, x, prim)
+      Rel.keys.ix(r, res, x, ix)
     case None{}:
       Nil{}
 
-def Fold.rel.hit(+r: Rel, +res: C.Res, +o: W.Out, +prim: S.Store, +s: S.Store,
+def Fold.rel.hit(+r: Rel, +res: C.Res, +o: W.Out, +ix: Ix, +s: S.Store,
   ks: List<&2, String>, +x: J.Json, hit: Bool) -> Fold:
   match hit:
     case True{}:
       Fold{S.Store.apply(s, o),
-        List.append(&2, String, Rel.keys(r, res, x, prim),
-          List.append(&2, String, Fold.rel.keys(r, res, S.Store.get(s, C.Obj.key(x)), prim), ks)),
+        List.append(&2, String, Rel.keys.ix(r, res, x, ix),
+          List.append(&2, String, Fold.rel.keys(r, res, S.Store.get(s, C.Obj.key(x)), ix), ks)),
         Nil{}}
     case False{}:
       Fold{S.Store.apply(s, o), ks, Nil{}}
@@ -342,34 +492,34 @@ def Out.is_delete(o: W.Out) -> Bool:
       False{}
 
 # A change triggers when it is a deletion or passes the watch's predicates.
-def Fold.rel.with(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +prim: S.Store, +s: S.Store,
+def Fold.rel.with(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +ix: Ix, +s: S.Store,
   ks: List<&2, String>, m: Maybe<&2, J.Json>) -> Fold:
   match m:
     case Some{+x}:
-      Fold.rel.hit(r, res, o, prim, s, ks, x,
-        Bool.or(Out.is_delete(o), Pred.passes(ps, S.Store.get(s, C.Obj.key(x)), x)))
+      Fold.rel.hit(r, res, o, ix, s, ks, x,
+        Bool.or(Out.is_delete(o), Pred.passes(ps, S.Store.get(s, C.Obj.key(x)), S.Store.slim(x))))
     case None{}:
       Fold{S.Store.apply(s, o), ks, Nil{}}
 
 # The primaries of related objects a relist drops (deleted while the
 # watch was down), by their cached versions.
-def Fold.rel.dropped(+r: Rel, +res: C.Res, ds: List<&2, String>, +s: S.Store, +prim: S.Store) ->
+def Fold.rel.dropped(+r: Rel, +res: C.Res, ds: List<&2, String>, +s: S.Store, +ix: Ix) ->
   List<&2, String>:
   match ds:
     case Nil{}:
       Nil{}
     case Con{k, t}:
-      List.append(&2, String, Fold.rel.keys(r, res, S.Store.get(s, k), prim),
-        Fold.rel.dropped(r, res, t, s, prim))
+      List.append(&2, String, Fold.rel.keys(r, res, S.Store.get(s, k), ix),
+        Fold.rel.dropped(r, res, t, s, ix))
 
-def Fold.rel.one.go(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +prim: S.Store, +s: S.Store,
+def Fold.rel.one.go(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +ix: Ix, +s: S.Store,
   ks: List<&2, String>, done: Bool) -> Fold:
   match done:
     case True{}:
       Fold{S.Store.apply(s, o),
-        List.append(&2, String, Fold.rel.dropped(r, res, S.Store.dropped(s), s, prim), ks), Nil{}}
+        List.append(&2, String, Fold.rel.dropped(r, res, S.Store.dropped(s), s, ix), ks), Nil{}}
     case False{}:
-      Fold.rel.with(r, ps, res, o, prim, s, ks, Out.obj(o))
+      Fold.rel.with(r, ps, res, o, ix, s, ks, Out.obj(o))
 
 def Out.is_done(o: W.Out) -> Bool:
   match o:
@@ -378,21 +528,25 @@ def Out.is_done(o: W.Out) -> Bool:
     case _:
       False{}
 
-def Fold.rel.one(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +prim: S.Store, f: Fold) -> Fold:
+def Fold.rel.one(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +ix: Ix, f: Fold) -> Fold:
   match f:
     case Fold{+s, ks, g}:
-      Fold.rel.one.go(r, ps, res, o, prim, s, ks, Out.is_done(o))
+      Fold.rel.one.go(r, ps, res, o, ix, s, ks, Out.is_done(o))
 
 # A related watch's outputs: every change that passes the watch's
 # predicates (ps; Nil passes all) triggers the primaries its relation maps
 # the object to, as cached before and as it is now.
-def Fold.rel_where(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, outs: List<&2, W.Out>, +prim: S.Store,
+def Fold.rel.go(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, outs: List<&2, W.Out>, +ix: Ix,
   f: Fold) -> Fold:
   match outs:
     case Nil{}:
       f
     case Con{+o, t}:
-      Fold.rel_where(r, ps, res, t, prim, Fold.rel.one(r, ps, res, o, prim, f))
+      Fold.rel.go(r, ps, res, t, ix, Fold.rel.one(r, ps, res, o, ix, f))
+
+def Fold.rel_where(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, outs: List<&2, W.Out>, +prim: S.Store,
+  f: Fold) -> Fold:
+  Fold.rel.go(r, ps, res, outs, Ix.of(r, prim), f)
 
 # Fold.rel_where without predicates: every change triggers.
 def Fold.rel(+r: Rel, +res: C.Res, outs: List<&2, W.Out>, +prim: S.Store, f: Fold) -> Fold:

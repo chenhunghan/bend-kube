@@ -147,6 +147,11 @@ def fence_line(+f: Chan(K.FenceMsg)) -> String:
 def timeout(s: X.Spec) -> String:
   U32.show(X.Spec.timeout_of(s))
 
+# A ConfigMap kubectl applied: its last-applied annotation, a team label.
+def applied(+rv: String, +team: String) -> J.Json:
+  js("{\"metadata\": {\"name\": \"k\", \"namespace\": \"web\", \"uid\": \"u-k\", \"resourceVersion\": \"" ++ rv
+    ++ "\", \"annotations\": {\"kubectl.kubernetes.io/last-applied-configuration\": \"{}\", \"team\": \"" ++ team ++ "\"}}}")
+
 def main() -> IO(Unit):
   # The first list fills the cache: everything reconciles, filtered or not.
   +listed = X.Fold.prim(gen(), [W.OInit{}, W.OInitApply{site("a", "1", "10", "", "s1")},
@@ -256,3 +261,7 @@ def main() -> IO(Unit):
     IO.print("timeouts: unset takes 30000: " ++ timeout(X.Spec.timeout_or(X.Spec.of(C.Api{res(), C.AllNs{}}), 30000))
       ++ "; own 500 wins: " ++ timeout(X.Spec.timeout_or(X.Spec.timeout(X.Spec.of(C.Api{res(), C.AllNs{}}), 500), 30000))
       ++ "; none: " ++ timeout(X.Spec.timeout_or(X.Spec.of(C.Api{res(), C.AllNs{}}), 0)))
+    IO.print("PAnnotations, a kubectl re-apply that changes nothing else: " ++ fold_keys(X.Fold.prim([X.PAnnotations{}],
+      [W.OApply{applied("2", "a")}], X.Fold{fold_store(X.Fold.prim(Nil{}, [W.OApply{applied("1", "a")}], X.Fold{S.Store.new(), Nil{}, Nil{}})), Nil{}, Nil{}}))
+      ++ "; a changed annotation: " ++ fold_keys(X.Fold.prim([X.PAnnotations{}],
+      [W.OApply{applied("2", "b")}], X.Fold{fold_store(X.Fold.prim(Nil{}, [W.OApply{applied("1", "a")}], X.Fold{S.Store.new(), Nil{}, Nil{}})), Nil{}, Nil{}})))
