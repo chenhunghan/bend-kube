@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/chenhunghan/bend-kube/compare/v0.5.5...v0.6.0) (2026-11-10)
+
+
+### Features
+
+* watches on other clusters, filters on related watches, a manager-wide reconcile timeout ([#22](https://github.com/chenhunghan/bend-kube/issues/22)) ([f704b24](https://github.com/chenhunghan/bend-kube/commit/f704b2474f4b9cc89233d51b05ff340abb23babf))
+
 ## [0.5.5](https://github.com/chenhunghan/bend-kube/compare/v0.5.4...v0.5.5) (2026-11-09)
 
 
