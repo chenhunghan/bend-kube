@@ -11,6 +11,7 @@ import ./src/proxy.bend as P
 import ./src/lease.bend as E
 import ./src/control.bend as X
 import ./src/cond.bend as Co
+import ./src/config.bend as K
 
 # LAWS
 # ====
@@ -564,3 +565,109 @@ law cond_new_status_moves_time:
   {Co.Cond.get(Co.Cond.set([Co.Cond.make("Ready", "False", r1, m1, "1", t0)],
     Co.Cond.make("Ready", "True", r2, m2, "2", now)), "Ready")
     == Some{Co.Cond.make("Ready", "True", r2, m2, "2", now)} : Maybe<&2, J.Json>}
+
+# Per-watch filters and clusters
+# ------------------------------
+
+# A related watch without predicates triggers on every change, as before
+# watches had filters.
+law rel_unfiltered_is_rel:
+  for r: X.Rel
+  for res: C.Res
+  for outs: List<&2, W.Out>
+  for prim: S.Store
+  for f: X.Fold
+  {X.Fold.rel_where(r, Nil{}, res, outs, prim, f) == X.Fold.rel(r, res, outs, prim, f) : X.Fold}
+
+# A deleted related object triggers its primaries, whatever the watch's
+# predicates: a filter never hides a deletion.
+law rel_filter_keeps_deletions:
+  for r: X.Rel
+  for ps: List<&2, X.Pred>
+  for res: C.Res
+  for x: J.Json
+  for prim: S.Store
+  for s: S.Store
+  for ks: List<&2, String>
+  for g: List<&2, String>
+  {X.Fold.rel_where(r, ps, res, [W.ODelete{x}], prim, X.Fold{s, ks, g})
+    == X.Fold.rel(r, res, [W.ODelete{x}], prim, X.Fold{s, ks, g}) : X.Fold}
+
+# A watch on another cluster runs under the controllers' leadership fence:
+# no request to any cluster outlives the lease.
+law cluster_keeps_fence:
+  for h: String
+  for p: U32
+  for b: String
+  for ca: K.Src
+  for cert: K.Src
+  for key: K.Src
+  for tok: K.Src
+  for ns: String
+  for pl: Maybe<&2, Chan(Socket)>
+  for lm: Maybe<&2, Chan(Unit)>
+  for sn: String
+  for fc: Maybe<&2, Chan(K.FenceMsg)>
+  for main: K.Config
+  {K.Config.fence(X.Cluster.of(main, Some{K.Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}}))
+    == K.Config.fence(main) : Maybe<&2, Chan(K.FenceMsg)>}
+
+# A primary on another cluster never borrows a connection pool: a pool
+# holds connections to one server.
+law cluster_drops_pool:
+  for a: C.Api
+  for h: String
+  for p: U32
+  for b: String
+  for ca: K.Src
+  for cert: K.Src
+  for key: K.Src
+  for tok: K.Src
+  for ns: String
+  for pl: Maybe<&2, Chan(Socket)>
+  for lm: Maybe<&2, Chan(Unit)>
+  for sn: String
+  for fc: Maybe<&2, Chan(K.FenceMsg)>
+  for main: K.Config
+  {X.Spec.clusters(X.Spec.on(X.Spec.of(a), K.Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}), main)
+    == [K.Config{h, p, b, ca, cert, key, tok, ns, None{}, lm, sn, K.Config.fence(main)}] : List<&2, K.Config>}
+
+# Without a cluster of its own, every watch runs on the controllers' config.
+law cluster_default_is_main:
+  for a: C.Api
+  for main: K.Config
+  {X.Spec.clusters(X.Spec.of(a), main) == [main] : List<&2, K.Config>}
+
+# A spec without its own reconcile timeout takes the manager's
+# (Opts.with_timeout); with none set anywhere there is none.
+law timeout_unset_takes_default:
+  for a: C.Api
+  for ms: U32
+  {X.Spec.timeout_or(X.Spec.of(a), ms) == X.Spec.timeout(X.Spec.of(a), ms) : X.Spec}
+
+# A spec's own timeout wins over the manager's.
+law timeout_own_wins:
+  for a: C.Api
+  for d: U32
+  {X.Spec.timeout_or(X.Spec.timeout(X.Spec.of(a), 500), d) == X.Spec.timeout(X.Spec.of(a), 500) : X.Spec}
+
+# A copy in another namespace (or cluster) reconciles the primary its
+# annotations name, in the namespace they name: a syncer's host object
+# maps back to its virtual one (vcluster's object-namespace, object-name).
+law annotated_triggers_named:
+  for prim: S.Store
+  {X.Rel.keys(X.RAnnotated{"src/ns", "src/name"}, C.Res{"", "v1", "Service", "services", True{}},
+    J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"web-x-default-x-vc"}},
+      J.KV{"namespace", J.JStr{"vc-host"}},
+      J.KV{"annotations", J.Json.obj([J.KV{"src/ns", J.JStr{"default"}}, J.KV{"src/name", J.JStr{"web"}}])}])}]),
+    prim)
+    == ["default/web"] : List<&2, String>}
+
+# Without the name annotation, an object names no primary.
+law annotated_needs_name:
+  for prim: S.Store
+  {X.Rel.keys(X.RAnnotated{"src/ns", "src/name"}, C.Res{"", "v1", "Service", "services", True{}},
+    J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{"other"}},
+      J.KV{"namespace", J.JStr{"vc-host"}},
+      J.KV{"annotations", J.Json.obj([J.KV{"src/ns", J.JStr{"default"}}])}])}]), prim)
+    == Nil{} : List<&2, String>}

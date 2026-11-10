@@ -427,3 +427,36 @@ def Config.with_fence(c: Config, f: Chan(FenceMsg)) -> Config:
   match c:
     case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, Some{f}}
+
+# The config with another config's leadership fence (or none): a watch on
+# another cluster stays fenced by the controllers' lease.
+def Config.fence_as(c: Config, m: Maybe<&2, Chan(FenceMsg)>) -> Config:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, m}
+
+def Src.ident(s: Src) -> String:
+  match s:
+    case Inline{t}:
+      "i:" ++ t
+    case FromFile{p}:
+      "f:" ++ p
+    case FromExec{c, a}:
+      "x:" ++ String.join(c <> a, " ")
+    case NoSrc{}:
+      "-"
+
+# Which cluster, as whom: the server and the credentials, so two configs
+# share a watch only when they would see the same objects. Never logged
+# (it can hold an inline token).
+def Config.ident(c: Config) -> String:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      h ++ ":" ++ U32.show(p) ++ b ++ "|" ++ sn ++ "|" ++ Src.ident(tok) ++ "|" ++ Src.ident(cert)
+
+# The config with no connection pool: one connection per request, until a
+# pool of its own is set (Config.with_pool).
+def Config.without_pool(c: Config) -> Config:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
+      Config{h, p, b, ca, cert, key, tok, ns, None{}, lm, sn, fc}

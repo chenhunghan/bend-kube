@@ -233,3 +233,30 @@ def Laws.renewal_overdue_from_last():
 
 def Laws.lease_thin_margin_refused():
   {==}
+
+def Laws.rel_unfiltered_is_rel(r, res, outs, prim, f):
+  {==}
+
+def Laws.rel_filter_keeps_deletions(r, ps, res, x, prim, s, ks, g):
+  {==}
+
+def Laws.cluster_keeps_fence(h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc, main):
+  {==}
+
+def Laws.cluster_drops_pool(a, h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc, main):
+  {==}
+
+def Laws.cluster_default_is_main(a, main):
+  {==}
+
+def Laws.timeout_unset_takes_default(a, ms):
+  {==}
+
+def Laws.timeout_own_wins(a, d):
+  {==}
+
+def Laws.annotated_triggers_named(prim):
+  {==}
+
+def Laws.annotated_needs_name(prim):
+  {==}

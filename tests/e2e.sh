@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 ctx=$(kubectl config current-context)
 case "$ctx" in *prod*) echo "refusing to run against context $ctx"; exit 1;; esac
 work=$(mktemp -d)
-trap 'kill $(jobs -p) 2>/dev/null || true; kubectl delete ns bend-e2e --wait=false >/dev/null 2>&1 || true; kubectl delete crd websites.bend-kube.dev --wait=false >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true; kubectl delete ns bend-e2e bend-e2e-host --wait=false >/dev/null 2>&1 || true; kubectl delete crd websites.bend-kube.dev --wait=false >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL $*"; exit 1; }
 k() { kubectl -n bend-e2e "$@"; }
@@ -133,6 +133,31 @@ kill -TERM "$(pgrep -f "$work/bundle")"
 for _ in $(seq 1 20); do pgrep -f "$work/bundle" >/dev/null || break; sleep 0.25; done
 pgrep -f "$work/bundle" >/dev/null && fail "bundle did not exit on SIGTERM" || true
 grep '"reconciles drained"' "$work/bundle.log" >/dev/null && pass "SIGTERM drains and exits" || fail "drain"
+
+echo "== a watch on another cluster"
+# The host cluster is the same API server under another identity (its
+# tls-server-name), so the host watch runs through a config of its own.
+sed 's/"bend-demo"/"bend-e2e"/; s/"bend-demo-host"/"bend-e2e-host"/' examples/sync.bend > examples/.sync-e2e.bend
+(cd examples && bend .sync-e2e.bend -o "$work/sync") >/dev/null 2>&1; rm -f examples/.sync-e2e.bend
+[ -x "$work/sync" ] || fail "build sync"
+kubectl create ns bend-e2e-host >/dev/null
+k create configmap src --from-literal=a=1 >/dev/null; k label configmap src bend-kube/sync=true >/dev/null
+hk() { kubectl -n bend-e2e-host "$@"; }
+HOST_KUBECONFIG="$work/sni-ok.json" KUBECONFIG="$work/kc.json" BEND_KUBE_PORT=0 "$work/sync" > "$work/sync.log" 2>&1 &
+for _ in $(seq 1 30); do [ "$(hk get cm src-x-bend-e2e -o jsonpath='{.data.a}' 2>/dev/null)" = 1 ] && break; sleep 1; done
+[ "$(hk get cm src-x-bend-e2e -o jsonpath='{.data.a}')" = 1 ] && pass "a source is copied to the host cluster" || fail "sync copy"
+k patch configmap src -p '{"data":{"a":"2"}}' >/dev/null
+for _ in $(seq 1 30); do [ "$(hk get cm src-x-bend-e2e -o jsonpath='{.data.a}')" = 2 ] && break; sleep 1; done
+[ "$(hk get cm src-x-bend-e2e -o jsonpath='{.data.a}')" = 2 ] && pass "a source's change reaches its copy" || fail "sync update"
+n0=$(grep -c '"synced"' "$work/sync.log")
+hk patch configmap src-x-bend-e2e -p '{"data":{"a":"drift"}}' >/dev/null
+sleep 3
+[ "$(grep -c '"synced"' "$work/sync.log")" = "$n0" ] && pass "the host watch's filter ignores a data edit" || fail "filter let a data edit through"
+hk delete configmap src-x-bend-e2e >/dev/null
+for _ in $(seq 1 30); do [ "$(hk get cm src-x-bend-e2e -o jsonpath='{.data.a}' 2>/dev/null)" = 2 ] && break; sleep 1; done
+[ "$(hk get cm src-x-bend-e2e -o jsonpath='{.data.a}' 2>/dev/null)" = 2 ] && pass "a copy deleted on the host maps back to its source and returns" || fail "sync restore"
+grep '"listing"' "$work/sync.log" | grep -q "bend-e2e-host" && pass "the host watch lists through its own config" || fail "host watch"
+pkill -f "$work/sync" || true
 
 echo "== rate limit and drain"
 (cd tests/fixtures && bend slow.bend -o "$work/slow") >/dev/null 2>&1 || fail "build slow"
