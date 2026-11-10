@@ -21,3 +21,15 @@ owned by a cluster-scoped Tenant: keys: t1; gone: -
 children of a, controller owners only: a-web
 a Secret with its data dropped: {"metadata":{"name":"s","namespace":"web","annotations":{"team":"a"}},"type":"Opaque"}
 fails in ctx: 4
+annotated copy in another namespace: keys: web/a web/b; gone: -
+related, labels unchanged: keys: -; gone: -
+related, labels changed: keys: web/a web/a; gone: -
+related, deleted: keys: web/a web/a; gone: -
+watch clusters: virtual host virtual
+one cluster: only
+primary on another cluster: far
+host watch: no pool; main: pooled
+host watch: fenced; without election: unfenced
+ctx cluster 1: host; ctx cluster 9: virtual
+watch 1 filtered: 1
+timeouts: unset takes 30000: 30000; own 500 wins: 500; none: 0

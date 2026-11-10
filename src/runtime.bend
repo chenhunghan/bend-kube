@@ -434,6 +434,15 @@ def Secs.drop(ss: List<&2, X.Sec>, n: Nat) -> List<&2, String>:
     case Con{s, t} 1n+k:
       Secs.drop(t, k)
 
+def Secs.preds(ss: List<&2, X.Sec>, n: Nat) -> List<&2, X.Pred>:
+  match ss n:
+    case Nil{} k:
+      Nil{}
+    case Con{s, t} 0n:
+      X.Sec.preds(s)
+    case Con{s, t} 1n+k:
+      Secs.preds(t, k)
+
 def Secs.rel(ss: List<&2, X.Sec>, n: Nat) -> X.Rel:
   match ss n:
     case Nil{} k:
@@ -548,7 +557,8 @@ def Ctl.on_outs.fold(st: CState, +src: U32, +outs: List<&2, W.Out>, +spec: X.Spe
     case CState{+s, +cs, q, x, p, tm} False{}:
       Ctl.rel.put(U32.to_nat((src - 1 : U32)), s, cs, q,
         Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs))), p, tm,
-        X.Fold.rel(Secs.rel(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))), X.Spec.res(spec),
+        X.Fold.rel_where(Secs.rel(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))),
+          Secs.preds(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))), X.Spec.res(spec),
           X.Out.trim_all(Secs.drop(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))), outs), s,
           X.Fold{Caches.nth(cs, U32.to_nat((src - 1 : U32))), Nil{}, Nil{}}))
 
@@ -932,7 +942,8 @@ def CCtx.cfg(c: CCtx) -> K.Config:
 def Ctl.ctx(st: CState, +c: CCtx) -> X.Ctx:
   match st:
     case CState{s, cs, q, x, p, tm}:
-      X.Ctx{CCtx.cfg(c), CCtx.idx(c), s, cs, 0, Some{CCtx.meter(c)}}
+      X.Ctx{CCtx.cfg(c), CCtx.idx(c), s, cs, 0, Some{CCtx.meter(c)},
+        X.Spec.clusters(CCtx.spec(c), CCtx.cfg(c))}
 
 def Ctl.report(+key: String, +kind: String, a: Q.Action) -> IO(Unit):
   match a:
@@ -1221,47 +1232,57 @@ def Ctrl.specs(cs: List<&2, Ctrl>) -> List<&2, X.Spec>:
     case Con{c, t}:
       Ctrl.spec(c) <> Ctrl.specs(t)
 
-# A watch: what, with which label and field selectors, for whom.
+# A watch: what, with which label and field selectors, on which cluster
+# (None: the controllers' own), for whom.
 type Watch is Data:
-  Watch{api: C.Api, label: String, field: String, subs: List<&2, Sub>}
+  Watch{api: C.Api, label: String, field: String, cluster: Maybe<&2, K.Config>, subs: List<&2, Sub>}
 
-def Watch.key(+api: C.Api, +label: String, +field: String) -> String:
-  C.Api.path(api) ++ "?l=" ++ label ++ "&f=" ++ field
+def Watch.at(m: Maybe<&2, K.Config>) -> String:
+  match m:
+    case None{}:
+      ""
+    case Some{c}:
+      K.Config.ident(c)
+
+# Two watches are one when they ask the same cluster, as the same user, for
+# the same objects.
+def Watch.key(+api: C.Api, +label: String, +field: String, +cl: Maybe<&2, K.Config>) -> String:
+  C.Api.path(api) ++ "?l=" ++ label ++ "&f=" ++ field ++ "&c=" ++ Watch.at(cl)
 
 def Plan.hit(ws: List<&2, Watch>, +key: String) -> Bool:
   match ws:
-    case Con{Watch{+a, +l, +fs, s}, t}:
-      String.eq(Watch.key(a, l, fs), key)
+    case Con{Watch{+a, +l, +fs, +c, s}, t}:
+      String.eq(Watch.key(a, l, fs, c), key)
     case _:
       False{}
 
 # Adds a subscription: to the watch of the same key, or as a new watch.
-def Plan.add(ws: List<&2, Watch>, +api: C.Api, +label: String, +field: String, +sub: Sub, hit: Bool) ->
-  List<&2, Watch>:
+def Plan.add(ws: List<&2, Watch>, +api: C.Api, +label: String, +field: String, +cl: Maybe<&2, K.Config>,
+  +sub: Sub, hit: Bool) -> List<&2, Watch>:
   match ws hit:
-    case Con{Watch{a, l, fs, ss}, t} True{}:
-      Watch{a, l, fs, List.append(&2, Sub, ss, [sub])} <> t
+    case Con{Watch{a, l, fs, c, ss}, t} True{}:
+      Watch{a, l, fs, c, List.append(&2, Sub, ss, [sub])} <> t
     case Con{+w, +t} False{}:
-      w <> Plan.add(t, api, label, field, sub, Plan.hit(t, Watch.key(api, label, field)))
+      w <> Plan.add(t, api, label, field, cl, sub, Plan.hit(t, Watch.key(api, label, field, cl)))
     case Nil{} _:
-      [Watch{api, label, field, [sub]}]
+      [Watch{api, label, field, cl, [sub]}]
 
-def Plan.sub(+ws: List<&2, Watch>, +api: C.Api, +label: String, +field: String, +sub: Sub) ->
-  List<&2, Watch>:
-  Plan.add(ws, api, label, field, sub, Plan.hit(ws, Watch.key(api, label, field)))
+def Plan.sub(+ws: List<&2, Watch>, +api: C.Api, +label: String, +field: String, +cl: Maybe<&2, K.Config>,
+  +sub: Sub) -> List<&2, Watch>:
+  Plan.add(ws, api, label, field, cl, sub, Plan.hit(ws, Watch.key(api, label, field, cl)))
 
 def Plan.secs(ss: List<&2, X.Sec>, +ch: Chan(Msg), +n: U32, ws: List<&2, Watch>) -> List<&2, Watch>:
   match ss:
     case Nil{}:
       ws
-    case Con{X.Sec{a, l, fs, r, d}, t}:
-      Plan.secs(t, ch, (n + 1 : U32), Plan.sub(ws, a, l, fs, Sub{ch, n}))
+    case Con{X.Sec{a, l, fs, r, d, ps, c}, t}:
+      Plan.secs(t, ch, (n + 1 : U32), Plan.sub(ws, a, l, fs, c, Sub{ch, n}))
 
 # Every watch the controllers need, each once, with all its subscribers.
 def Plan.build(cs: List<&2, X.Spec>, chs: List<&2, Chan(Msg)>, ws: List<&2, Watch>) -> List<&2, Watch>:
   match cs chs:
-    case Con{X.Spec{p, l, fs, ps, ss, m, to}, t} Con{+ch, ct}:
-      Plan.build(t, ct, Plan.secs(ss, ch, 1, Plan.sub(ws, p, l, fs, Sub{ch, 0})))
+    case Con{X.Spec{p, l, fs, ps, ss, m, to, c}, t} Con{+ch, ct}:
+      Plan.build(t, ct, Plan.secs(ss, ch, 1, Plan.sub(ws, p, l, fs, c, Sub{ch, 0})))
     case _ _:
       ws
 
@@ -1278,8 +1299,8 @@ def Manager.watch(+cfg: K.Config, ws: List<&2, Watch>) -> IO(Unit):
   match ws:
     case Nil{}:
       IO.pure(Unit, Unit{})
-    case Con{Watch{a, l, fs, ss}, t}:
-      IO.bind(Unit, Unit, Ctl.watch.subs(cfg, a, l, fs, ss), u => Manager.watch(cfg, t))
+    case Con{Watch{a, l, fs, c, ss}, t}:
+      IO.bind(Unit, Unit, Ctl.watch.subs(X.Cluster.of(cfg, c), a, l, fs, ss), u => Manager.watch(cfg, t))
 
 def Manager.loops(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, cs: List<&2, X.Spec>,
   chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +i: U32) -> IO(Unit):

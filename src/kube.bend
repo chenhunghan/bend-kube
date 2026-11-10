@@ -28,21 +28,23 @@ import ./log.bend as L
 # for Kube.run only (a spec carries its own); port: health and metrics (0:
 # off); leader: the Lease to hold while running; grace: how long SIGTERM
 # waits for running reconciles, in ms; qps and burst: the client's rate
-# limit (qps 0: none).
+# limit (qps 0: none); timeout: the reconcile timeout of every spec
+# that sets none (X.Spec.timeout), in ms (0: none).
 type Opts is Data:
   Opts{max: U32, port: U32, leader: Maybe<&2, E.LOpts>, label: String, grace: U32, qps: U32,
-    burst: U32}
+    burst: U32, timeout: U32}
 
 # 8 reconciles at once, health and metrics on :8080, no leader election, a
 # 20s grace period (with up to 4s to hand the lease back, inside
-# Kubernetes' default 30s), and 50 requests a second with bursts of 100.
+# Kubernetes' default 30s), 50 requests a second with bursts of 100, and
+# no reconcile timeout.
 def Opts.default() -> Opts:
-  Opts{8, 8080, None{}, "", 20000, 50, 100}
+  Opts{8, 8080, None{}, "", 20000, 50, 100, 0}
 
 def Opts.with_leader(o: Opts, ns: String, name: String, id: String) -> Opts:
   match o:
-    case Opts{m, p, l, s, g, q, b}:
-      Opts{m, p, Some{E.LOpts.default(ns, name, id)}, s, g, q, b}
+    case Opts{m, p, l, s, g, q, b, t}:
+      Opts{m, p, Some{E.LOpts.default(ns, name, id)}, s, g, q, b, t}
 
 # Leader election under a Lease in ns named name, identified as this
 # replica: its HOSTNAME (the pod name) and a random suffix, so two replicas
@@ -54,34 +56,43 @@ def Opts.with_election(o: Opts, ns: String, name: String) -> Opts:
 # identity, lease seconds, renew deadline ms, retry ms).
 def Opts.with_lease(o: Opts, lo: E.LOpts) -> Opts:
   match o:
-    case Opts{m, p, l, s, g, q, b}:
-      Opts{m, p, Some{lo}, s, g, q, b}
+    case Opts{m, p, l, s, g, q, b, t}:
+      Opts{m, p, Some{lo}, s, g, q, b, t}
 
 def Opts.with_label(o: Opts, label: String) -> Opts:
   match o:
-    case Opts{m, p, l, s, g, q, b}:
-      Opts{m, p, l, label, g, q, b}
+    case Opts{m, p, l, s, g, q, b, t}:
+      Opts{m, p, l, label, g, q, b, t}
 
 def Opts.with_max(o: Opts, max: U32) -> Opts:
   match o:
-    case Opts{m, p, l, s, g, q, b}:
-      Opts{max, p, l, s, g, q, b}
+    case Opts{m, p, l, s, g, q, b, t}:
+      Opts{max, p, l, s, g, q, b, t}
 
 def Opts.with_port(o: Opts, port: U32) -> Opts:
   match o:
-    case Opts{m, p, l, s, g, q, b}:
-      Opts{m, port, l, s, g, q, b}
+    case Opts{m, p, l, s, g, q, b, t}:
+      Opts{m, port, l, s, g, q, b, t}
 
 def Opts.with_grace(o: Opts, ms: U32) -> Opts:
   match o:
-    case Opts{m, p, l, s, g, q, b}:
-      Opts{m, p, l, s, ms, q, b}
+    case Opts{m, p, l, s, g, q, b, t}:
+      Opts{m, p, l, s, ms, q, b, t}
+
+# A reconcile timeout, ms, for every spec that sets none (0: none, the
+# default), as controller-runtime's manager-wide ReconciliationTimeout. A
+# spec's own X.Spec.timeout wins. Bend cannot cancel a reconcile, so a
+# reconcile past it exits the process (status 1), as X.Spec.timeout says.
+def Opts.with_timeout(o: Opts, ms: U32) -> Opts:
+  match o:
+    case Opts{m, p, l, s, g, q, b, t}:
+      Opts{m, p, l, s, g, q, b, ms}
 
 # qps 0 turns the rate limit off.
 def Opts.with_rate(o: Opts, qps: U32, burst: U32) -> Opts:
   match o:
-    case Opts{m, p, l, s, g, q, b}:
-      Opts{m, p, l, s, g, qps, burst}
+    case Opts{m, p, l, s, g, q, b, t}:
+      Opts{m, p, l, s, g, qps, burst, t}
 
 def Kube.serve.go(+port: U32, +status: Chan(R.SMsg), +meter: Chan(X.Meter), off: Bool) -> IO(Unit):
   match off:
@@ -148,21 +159,64 @@ def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Bool), work: IO(
     case None{}:
       IO.bind(Unit, Unit, IO.spawn(Unit, Kube.on_signal(drain)), u => work)
 
+# Each watch on another cluster gets a pool of its own: a pool holds
+# connections to one API server, never shared across servers.
+def Kube.pool_on(m: Maybe<&2, K.Config>) -> IO(Maybe<&2, K.Config>):
+  match m:
+    case None{}:
+      IO.pure(Maybe<&2, K.Config>, None{})
+    case Some{c}:
+      IO.bind(Chan(Socket), Maybe<&2, K.Config>, Chan.new(Socket, 8),
+        p => IO.pure(Maybe<&2, K.Config>, Some{K.Config.with_pool(c, p)}))
+
+def Kube.pool_secs(ss: List<&2, X.Sec>) -> IO(List<&2, X.Sec>):
+  match ss:
+    case Nil{}:
+      IO.pure(List<&2, X.Sec>, Nil{})
+    case Con{X.Sec{a, l, f, r, d, ps, c}, t}:
+      IO.bind(Maybe<&2, K.Config>, List<&2, X.Sec>, Kube.pool_on(c),
+        c2 => IO.bind(List<&2, X.Sec>, List<&2, X.Sec>, Kube.pool_secs(t),
+          t2 => IO.pure(List<&2, X.Sec>, X.Sec{a, l, f, r, d, ps, c2} <> t2)))
+
+def Kube.pool_specs(ss: List<&2, X.Spec>) -> IO(List<&2, X.Spec>):
+  match ss:
+    case Nil{}:
+      IO.pure(List<&2, X.Spec>, Nil{})
+    case Con{X.Spec{p, l, fs, ps, secs, m, to, c}, t}:
+      IO.bind(Maybe<&2, K.Config>, List<&2, X.Spec>, Kube.pool_on(c),
+        c2 => IO.bind(List<&2, X.Sec>, List<&2, X.Spec>, Kube.pool_secs(secs),
+          secs2 => IO.bind(List<&2, X.Spec>, List<&2, X.Spec>, Kube.pool_specs(t),
+            t2 => IO.pure(List<&2, X.Spec>, X.Spec{p, l, fs, ps, secs2, m, to, c2} <> t2))))
+
+def Kube.timeouts(ss: List<&2, X.Spec>, +ms: U32) -> List<&2, X.Spec>:
+  match ss:
+    case Nil{}:
+      Nil{}
+    case Con{s, t}:
+      X.Spec.timeout_or(s, ms) <> Kube.timeouts(t, ms)
+
+def Kube.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +ecfg: K.Config,
+  +specs: List<&2, X.Spec>, +p: U32, l: Maybe<&2, E.LOpts>, +grace: U32) -> IO(Unit):
+  IO.bind(List<&2, Chan(R.Msg)>, Unit, R.Manager.inboxes(List.length(&2, X.Spec, specs)),
+    +chs => IO.bind(Chan(R.SMsg), Unit, R.Keeper.start(),
+      +status => IO.bind(Chan(Unit), Unit, R.Manager.gate(),
+        +gate => IO.bind(Chan(X.Meter), Unit, R.Meter.start(), +meter => IO.bind(Unit, Unit, Kube.serve(p, status, meter),
+          u => IO.bind(Unit, Unit, L.Log.info("starting controllers",
+            [L.Log.kv("count", Nat.show(List.length(&2, X.Spec, specs))),
+              L.Log.kv("server", K.Config.host(cfg))]),
+            u2 => Kube.elect(ecfg, l, R.Manager.stop(chs, gate, grace),
+              R.Manager.start(~rec, cfg, specs, chs, status, meter, gate))))))))
+
 # cfg serves the controllers (rate-limited); ecfg serves leader election,
 # outside the rate limit, so a burst of reconciles never delays a renewal.
+# Every spec without its own reconcile timeout takes Opts.timeout, and
+# every watch on another cluster gets its own connection pool.
 def Kube.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +ecfg: K.Config,
-  +specs: List<&2, X.Spec>, o: Opts) -> IO(Unit):
+  specs: List<&2, X.Spec>, o: Opts) -> IO(Unit):
   match o:
-    case Opts{m, +p, l, sel, +grace, q, b}:
-      IO.bind(List<&2, Chan(R.Msg)>, Unit, R.Manager.inboxes(List.length(&2, X.Spec, specs)),
-        +chs => IO.bind(Chan(R.SMsg), Unit, R.Keeper.start(),
-          +status => IO.bind(Chan(Unit), Unit, R.Manager.gate(),
-            +gate => IO.bind(Chan(X.Meter), Unit, R.Meter.start(), +meter => IO.bind(Unit, Unit, Kube.serve(p, status, meter),
-              u => IO.bind(Unit, Unit, L.Log.info("starting controllers",
-                [L.Log.kv("count", Nat.show(List.length(&2, X.Spec, specs))),
-                  L.Log.kv("server", K.Config.host(cfg))]),
-                u2 => Kube.elect(ecfg, l, R.Manager.stop(chs, gate, grace),
-                  R.Manager.start(~rec, cfg, specs, chs, status, meter, gate))))))))
+    case Opts{m, +p, l, sel, +grace, q, b, +to}:
+      IO.bind(List<&2, X.Spec>, Unit, Kube.pool_specs(Kube.timeouts(specs, to)),
+        +ss => Kube.start.go(~rec, cfg, ecfg, ss, p, l, grace))
 
 # Up to 8 idle keep-alive connections shared by every request.
 def Kube.pool() -> IO(Chan(Socket)):
@@ -176,14 +230,20 @@ def Kube.limited(+cfg: K.Config, +qps: U32, +burst: U32, off: Bool) -> IO(K.Conf
       IO.bind(Chan(Unit), K.Config, Cl.Limit.start(qps, burst),
         ch => IO.pure(K.Config, K.Config.with_limit(cfg, ch)))
 
+# A config for another cluster (X.Spec.on, X.Spec.watch_on) with its own
+# rate limit (qps 0: none), as Kube.control gives the controllers' config;
+# Kube.control gives it its own connection pool.
+def Kube.connect(+cfg: K.Config, +qps: U32, +burst: U32) -> IO(K.Config):
+  Kube.limited(cfg, qps, burst, U32.is_eq(qps, 0))
+
 def Kube.rate(o: Opts, +cfg: K.Config) -> IO(K.Config):
   match o:
-    case Opts{m, p, l, s, g, +q, b}:
+    case Opts{m, p, l, s, g, +q, b, t}:
       Kube.limited(cfg, q, b, U32.is_eq(q, 0))
 
 def Opts.elects(o: Opts) -> Bool:
   match o:
-    case Opts{m, p, Some{l}, s, g, q, b}:
+    case Opts{m, p, Some{l}, s, g, q, b, t}:
       True{}
     case _:
       False{}
@@ -240,7 +300,7 @@ def Kube.control(~rec: J.Json -> X.Ctx -> IO(Q.Action), spec: X.Spec, o: Opts) -
 
 def Opts.ctrl(o: Opts, primary: C.Api, owned: List<&2, C.Api>) -> R.Ctrl:
   match o:
-    case Opts{m, p, l, s, g, q, b}:
+    case Opts{m, p, l, s, g, q, b, t}:
       R.Ctrl{primary, s, owned, m}
 
 # Runs a controller for primary, owning owned, reconciling with rec(obj,

@@ -92,7 +92,60 @@ def fold_obj(f: X.Fold) -> J.Json:
 
 def ctx(+prim: S.Store, +rel: S.Store) -> X.Ctx:
   X.Ctx{K.Config{"h", 443, "", K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, "default", None{}, None{}, "", None{}},
-    3, prim, [rel], 0, None{}}
+    3, prim, [rel], 0, None{}, Nil{}}
+
+def cfg(+host: String) -> K.Config:
+  K.Config{host, 443, "", K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, "default", None{}, None{}, "", None{}}
+
+def hosts(cs: List<&2, K.Config>) -> String:
+  match cs:
+    case Nil{}:
+      "-"
+    case Con{c, Nil{}}:
+      K.Config.host(c)
+    case Con{c, t}:
+      K.Config.host(c) ++ " " ++ hosts(t)
+
+def has(m: Maybe<&2, Chan(K.FenceMsg)>) -> String:
+  match m:
+    case Some{x}:
+      "fenced"
+    case None{}:
+      "unfenced"
+
+def pooled(m: Maybe<&2, Chan(Socket)>) -> String:
+  match m:
+    case Some{x}:
+      "pooled"
+    case None{}:
+      "no pool"
+
+def nth_cfg(cs: List<&2, K.Config>, n: Nat) -> K.Config:
+  Maybe.default(&2, K.Config, List.get(&2, K.Config, cs, n), cfg("none"))
+
+# A spec: websites in the controller's cluster, Secrets on a host cluster
+# filtered by labels, and ConfigMaps in the controller's cluster.
+def multi(+host: K.Config) -> X.Spec:
+  X.Spec.watches(X.Spec.watch_filter(X.Spec.watch_on(X.Spec.watches(X.Spec.of(C.Api{res(), C.AllNs{}}),
+    C.Api{C.Res{"", "v1", "Secret", "secrets", True{}}, C.AllNs{}}, X.ROwner{}), host),
+    [X.PLabels{}]), C.Api{C.Res{"", "v1", "ConfigMap", "configmaps", True{}}, C.AllNs{}}, X.RAll{})
+
+# A borrowed pool never crosses clusters: the host watch drops the pool
+# its config carried; the controllers' own config keeps its pool.
+def pool_line(+p: Chan(Socket)) -> String:
+  "host watch: " ++ pooled(K.Config.pool(nth_cfg(X.Spec.clusters(multi(K.Config.with_pool(cfg("host"), p)),
+    K.Config.with_pool(cfg("virtual"), p)), 1n))) ++ "; main: "
+    ++ pooled(K.Config.pool(nth_cfg(X.Spec.clusters(multi(cfg("host")), K.Config.with_pool(cfg("virtual"), p)), 0n)))
+
+# Every watch's config carries the controllers' leadership fence, or none
+# when they run without election.
+def fence_line(+f: Chan(K.FenceMsg)) -> String:
+  "host watch: " ++ has(K.Config.fence(nth_cfg(X.Spec.clusters(multi(cfg("host")),
+    K.Config.with_fence(cfg("virtual"), f)), 1n))) ++ "; without election: "
+    ++ has(K.Config.fence(nth_cfg(X.Spec.clusters(multi(cfg("host")), cfg("virtual")), 1n)))
+
+def timeout(s: X.Spec) -> String:
+  U32.show(X.Spec.timeout_of(s))
 
 def main() -> IO(Unit):
   # The first list fills the cache: everything reconciles, filtered or not.
@@ -144,6 +197,18 @@ def main() -> IO(Unit):
     W.OInitApply{thing("a-extra", "web", "", plain_owner("a"))}, W.OInitDone{}], prim,
     X.Fold{S.Store.new(), Nil{}, Nil{}}))
   +c2 = ctx(prim, rel2)
+  # A related watch filtered by labels: a change that leaves them alone is
+  # quiet, a label change and a deletion trigger.
+  +lab0 = fold_store(X.Fold.rel_where(X.ROwner{}, [X.PLabels{}], res(),
+    [W.OApply{thing("a-web", "web", "\"v\": \"1\"", owner("a"))}], prim, X.Fold{S.Store.new(), Nil{}, Nil{}}))
+  +lab_same = X.Fold.rel_where(X.ROwner{}, [X.PLabels{}], res(),
+    [W.OApply{thing("a-web", "web", "\"v\": \"1\"", owner("a"))}], prim, X.Fold{lab0, Nil{}, Nil{}})
+  +lab_new = X.Fold.rel_where(X.ROwner{}, [X.PLabels{}], res(),
+    [W.OApply{thing("a-web", "web", "\"v\": \"2\"", owner("a"))}], prim, X.Fold{lab0, Nil{}, Nil{}})
+  +lab_del = X.Fold.rel_where(X.ROwner{}, [X.PLabels{}], res(),
+    [W.ODelete{thing("a-web", "web", "\"v\": \"1\"", owner("a"))}], prim, X.Fold{lab0, Nil{}, Nil{}})
+  +spec = multi(cfg("host"))
+  +cls = X.Spec.clusters(spec, cfg("virtual"))
   do IO<Unit>:
     IO.print("first list: " ++ fold_keys(listed))
     IO.print("status write, spec change, deletion, delete: " ++ fold_keys(later))
@@ -170,3 +235,24 @@ def main() -> IO(Unit):
       X.Out.trim_all(["data", "stringData"], [W.OApply{js("{\"metadata\": {\"name\": \"s\", \"namespace\": \"web\", \"annotations\": {\"kubectl.kubernetes.io/last-applied-configuration\": \"{data: v}\", \"team\": \"a\"}}, \"type\": \"Opaque\", \"data\": {\"k\": \"dg==\"}}")}]),
       prim, X.Fold{S.Store.new(), Nil{}, Nil{}}))))
     IO.print("fails in ctx: " ++ U32.show(X.Ctx.fails(X.Ctx.with_fails(c, 4))))
+    IO.print("annotated copy in another namespace: " ++ fold_keys(X.Fold.rel(X.RAnnotated{"src/ns", "src/name"}, res(),
+      [W.OApply{js("{\"metadata\": {\"name\": \"a-x-web-x-vc\", \"namespace\": \"host\", \"annotations\": {\"src/ns\": \"web\", \"src/name\": \"a\"}}}")},
+       W.OApply{js("{\"metadata\": {\"name\": \"b\", \"namespace\": \"web\", \"annotations\": {\"src/name\": \"b\"}}}")},
+       W.OApply{js("{\"metadata\": {\"name\": \"stray\", \"namespace\": \"host\"}}")}],
+      prim, X.Fold{S.Store.new(), Nil{}, Nil{}})))
+    IO.print("related, labels unchanged: " ++ fold_keys(lab_same))
+    IO.print("related, labels changed: " ++ fold_keys(lab_new))
+    IO.print("related, deleted: " ++ fold_keys(lab_del))
+    IO.print("watch clusters: " ++ hosts(cls))
+    IO.print("one cluster: " ++ hosts(X.Spec.clusters(X.Spec.of(C.Api{res(), C.AllNs{}}), cfg("only"))))
+    IO.print("primary on another cluster: " ++ hosts(X.Spec.clusters(X.Spec.on(X.Spec.of(C.Api{res(), C.AllNs{}}), cfg("far")), cfg("near"))))
+    pool : Chan(Socket) <- Chan.new(Socket, 1)
+    IO.print(pool_line(pool))
+    fc : Chan(K.FenceMsg) <- Chan.new(K.FenceMsg, 1)
+    IO.print(fence_line(fc))
+    IO.print("ctx cluster 1: " ++ K.Config.host(X.Ctx.cluster(X.Ctx{cfg("virtual"), 0, S.Store.new(), Nil{}, 0, None{}, cls}, 1))
+      ++ "; ctx cluster 9: " ++ K.Config.host(X.Ctx.cluster(X.Ctx{cfg("virtual"), 0, S.Store.new(), Nil{}, 0, None{}, cls}, 9)))
+    IO.print("watch 1 filtered: " ++ U32.show(U32.from_nat(List.length(&2, X.Pred, X.Sec.preds(Maybe.default(&2, X.Sec, List.get(&2, X.Sec, X.Spec.secs(spec), 0n), X.Sec{C.Api{res(), C.AllNs{}}, "", "", X.RAll{}, Nil{}, Nil{}, None{}}))))))
+    IO.print("timeouts: unset takes 30000: " ++ timeout(X.Spec.timeout_or(X.Spec.of(C.Api{res(), C.AllNs{}}), 30000))
+      ++ "; own 500 wins: " ++ timeout(X.Spec.timeout_or(X.Spec.timeout(X.Spec.of(C.Api{res(), C.AllNs{}}), 500), 30000))
+      ++ "; none: " ++ timeout(X.Spec.timeout_or(X.Spec.of(C.Api{res(), C.AllNs{}}), 0)))

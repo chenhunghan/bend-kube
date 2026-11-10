@@ -8,6 +8,7 @@ import ../src/queue.bend as Q
 import ../src/control.bend as X
 import ../src/runtime.bend as R
 import ../src/client.bend as Cl
+import ../src/config.bend as K
 
 # Scenarios through the controller loop's pure steps: dispatch past keys
 # whose objects are gone, one pending wake per key however often it is
@@ -134,6 +135,34 @@ def waits(st: R.CState, +key: String) -> Bool:
     case R.CState{s, cs, q, x, p, t}:
       Q.Queue.waiting(q, key)
 
+def kcfg(+host: String) -> K.Config:
+  K.Config{host, 443, "", K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, K.NoSrc{}, "default", None{}, None{}, "", None{}}
+
+def cms() -> C.Api:
+  C.Api{C.Res{"", "v1", "ConfigMap", "configmaps", True{}}, C.AllNs{}}
+
+def pods() -> C.Api:
+  C.Api{C.Res{"", "v1", "Pod", "pods", True{}}, C.AllNs{}}
+
+def plan_line(ws: List<&2, R.Watch>) -> String:
+  match ws:
+    case Nil{}:
+      ""
+    case Con{R.Watch{a, l, f, None{}, ss}, t}:
+      " " ++ C.Api.path(a) ++ "@main x" ++ Nat.show(List.length(&2, R.Sub, ss)) ++ plan_line(t)
+    case Con{R.Watch{a, l, f, Some{c}, ss}, t}:
+      " " ++ C.Api.path(a) ++ "@" ++ K.Config.host(c) ++ " x" ++ Nat.show(List.length(&2, R.Sub, ss))
+        ++ plan_line(t)
+
+# Two controllers: both watch ConfigMaps in their own cluster (one shared
+# watch); the second also watches them on the host cluster, twice (one
+# more watch, two subscribers), and pods there.
+def plan(+ch: Chan(R.Msg)) -> String:
+  plan_line(R.Plan.build([X.Spec.of(cms()),
+    X.Spec.watch_on(X.Spec.watches(X.Spec.watch_on(X.Spec.watches(X.Spec.watch_on(X.Spec.watches(
+      X.Spec.of(cms()), cms(), X.RAll{}), kcfg("host")), cms(), X.RAll{}), kcfg("host")), pods(), X.RAll{}),
+      kcfg("host"))], [ch, ch], Nil{}))
+
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
   # (their objects deleted), the third is live: dispatch must reach it.
@@ -180,3 +209,5 @@ def main() -> IO(Unit):
     IO.print("tokens in the first second (a fraction carries over) at qps 1, 3, 7, 50, 75, 333, 1000: " ++ tokens(1, 100) ++ " "
       ++ tokens(3, 100) ++ " " ++ tokens(7, 100) ++ " " ++ tokens(50, 100) ++ " " ++ tokens(75, 100)
       ++ " " ++ tokens(333, 100) ++ " " ++ tokens(1000, 100))
+    ch : Chan(R.Msg) <- Chan.new(R.Msg, 1)
+    IO.print("watches across clusters:" ++ plan(ch))

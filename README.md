@@ -130,6 +130,10 @@ transforms kube-rs and controller-runtime users apply by hand.
   - `X.RRef{path}`: a field of the primary (a string, or a list of strings)
     names the object. An example is a Secret named in `spec.secretName`.
   - `X.RAll{}`: every primary in the object's namespace.
+  - `X.RAnnotated{ns_key, name_key}`: two annotations name the primary's
+    namespace (the object's own when that one is missing) and name. A
+    syncer's copy in another namespace or cluster maps back this way, as
+    vcluster's `vcluster.loft.sh/object-namespace` and `object-name` do.
 
   When a related watch relists, objects that vanished while it was down
   reconcile the primaries they mapped to. `X.Spec.watches_where(s, api,
@@ -139,6 +143,28 @@ transforms kube-rs and controller-runtime users apply by hand.
   last related watch out of its cache. A controller that only needs to
   know a referenced Secret changed then holds no Secret's data; it reads
   what it needs with `Client.get`.
+
+  `X.Spec.watch_filter(s, preds)` filters the last related watch with the
+  same predicates `X.Spec.filter` gives the primary (below). A change
+  triggers its primaries only when what the predicates see differs from
+  the cached object. Deletions, objects a relist drops, a new uid, the
+  start of a deletion and a change of finalizers always trigger. Without
+  it, every change triggers.
+- **Other clusters.** `X.Spec.watch_on(s, cfg)` runs the last related
+  watch against another cluster, and `X.Spec.on(s, cfg)` runs the primary
+  there. A syncer can then watch its primaries in one cluster and their
+  copies in another, mapping each copy back by label (`X.RLabel{key}`).
+  `X.Ctx.cluster(ctx, n)` gives the reconcile the config of watch n (0 the
+  primary, n the n-th related watch); `X.Ctx.cfg` stays the controllers'
+  own config, which holds the lease.
+  - The same resource and selectors on two clusters are two watches. On
+    one cluster, as the same user, they are one watch shared by every
+    controller.
+  - Under leader election every config takes the controllers' leadership
+    fence, so no request to any cluster outlives the lease.
+  - Each such config gets a connection pool of its own, since a pool holds
+    connections to one server. A pool the config carried is dropped.
+    `Kb.Kube.connect(cfg, qps, burst)` gives it its own rate limit.
 - `X.Spec.filter(s, preds)` (kube-runtime's `predicate_filter`): a primary
   change reconciles only when one of these differs from the cached object:
   `X.PGeneration{}` (the spec), `X.PLabels{}`, `X.PAnnotations{}` or
@@ -159,7 +185,10 @@ transforms kube-rs and controller-runtime users apply by hand.
   hung. The process logs it and exits with status 1, so the pod restarts as
   after a crash. A Bend computation can't be cancelled, and freeing the key
   while the late run continued would let the same key run twice.
-  - The default is no limit. Each limit holds a sleeper until it expires,
+  - The default is no limit, as in controller-runtime and kube-runtime.
+    `Kb.Opts.with_timeout(o, ms)` sets one for every spec that sets none
+    (controller-runtime's manager-wide `ReconciliationTimeout`); a spec's
+    own wins. Each limit holds a sleeper until it expires,
     even after the reconcile finishes, so a five-minute timeout at 100
     reconciles a second holds 30,000 sleepers.
   - Without a limit, a hung reconcile holds its slot.
@@ -457,7 +486,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 64 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 73 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -498,7 +527,16 @@ loop.
   - a cluster-scoped owner is queued by name;
   - an owner of the same kind in another group queues nothing;
   - under any predicate, a change of finalizers reconciles.
-  - an object recreated under the same name (a new uid) reconciles.
+  - an object recreated under the same name (a new uid) reconciles;
+  - an object's annotations name the primary of `RAnnotated`, in the
+    namespace they name, and without the name annotation none;
+  - a related watch without predicates triggers on every change, and a
+    filtered one still triggers on every deletion;
+  - a watch on another cluster keeps the controllers' leadership fence and
+    never borrows a connection pool; without a cluster of its own it runs
+    on the controllers' config;
+  - a spec without its own reconcile timeout takes the manager's, and its
+    own wins.
 - **Leader election:**
   - another holder's Lease seen changing within its duration is live;
   - our clock stepping back doesn't expire it;
@@ -680,13 +718,12 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
   - An operator that needs admission or conversion webhooks runs them as a
     separate service. A TLS sidecar alone is not enough: the webhook
     protocol (AdmissionReview, ConversionReview) must be served too.
-- **Watch shaping.** Predicates apply to the primary only; related watches
-  trigger on every change. Relations are the four kinds above; there is no
+- **Watch shaping.** Relations are the five kinds above; there is no
   arbitrary mapper function.
 - **Resync.** There is no periodic resync of every object. A reconcile asks
   for its next look with `Requeue{ms}`.
-- **One cluster per process.** All controllers of a process share one
-  config. `Kube.control_with` picks which cluster.
+- **One lease.** Watches can run on other clusters (`X.Spec.watch_on`),
+  but leader election and `X.Ctx.cfg` use the controllers' own config.
 - **Plain HTTP.** The client speaks only TLS to the API server; it isn't a
   general HTTP client for external systems.
 - **Typed patches.** Generated encoders omit absent fields, so a merge

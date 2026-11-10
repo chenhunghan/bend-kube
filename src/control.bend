@@ -24,9 +24,14 @@ import ./store.bend as S
 #   reconciles. ROwner follows ownerReferences of the primary's kind;
 #   RLabel reads the primary's name from a label; RRef finds the primaries
 #   whose field (a path into the object) names the related object; RAll
-#   reconciles every primary in the object's namespace. Both the object as
+#   reconciles every primary in the object's namespace; RAnnotated reads
+#   the primary's namespace and name from two annotations, as a syncer
+#   records where a copy in another namespace or cluster came from
+#   (vcluster's object-namespace and object-name). Both the object as
 #   it was cached and as it is now are mapped, so a relation that moves
 #   reconciles the old primary as well as the new one.
+# - Clusters: a watch runs against the controllers' config, or another
+#   cluster's (Spec.on, Spec.watch_on), under the same leadership fence.
 # - The context a reconcile gets (Ctx): the client config, the
 #   controller's index, and read-only snapshots of every cache the
 #   controller keeps: the primary's and each related watch's.
@@ -108,6 +113,7 @@ type Rel is Data:
   RLabel{key: String}
   RRef{path: List<&2, String>}
   RAll{}
+  RAnnotated{ns_key: String, name_key: String}
 
 # A field names the object: the string itself, or a list holding it.
 def Ref.names.any(xs: List<&2, J.Json>, +name: String) -> Bool:
@@ -177,6 +183,24 @@ def Rel.label(m: Maybe<&2, String>, +ns: String, +res: C.Res) -> List<&2, String
     case None{}:
       Nil{}
 
+def Rel.annot(o: J.Json, key: String) -> Maybe<&2, String>:
+  J.Json.as_str(J.Json.get(C.Obj.meta(o, "annotations"), key))
+
+def Rel.annotated.go(+res: C.Res, ns: Maybe<&2, String>, name: Maybe<&2, String>, +own: String) ->
+  List<&2, String>:
+  match ns name:
+    case Some{+n} Some{+v}:
+      [Rel.key(res, n, v)]
+    case None{} Some{+v}:
+      [Rel.key(res, own, v)]
+    case _ None{}:
+      Nil{}
+
+# The primary two annotations name: its namespace (the object's own when
+# that annotation is missing) and its name (nothing without it).
+def Rel.annotated(+o: J.Json, +nk: String, +vk: String, +res: C.Res) -> List<&2, String>:
+  Rel.annotated.go(res, Rel.annot(o, nk), Rel.annot(o, vk), C.Obj.namespace(o))
+
 # The group of an apiVersion: "apps" of "apps/v1", "" of "v1".
 def Ref.group.go(ps: List<&2, String>) -> String:
   match ps:
@@ -225,6 +249,8 @@ def Rel.keys(r: Rel, +res: C.Res, +o: J.Json, +prim: S.Store) -> List<&2, String
       Rel.refs(S.Store.values(prim), path, C.Obj.namespace(o), C.Obj.name(o))
     case RAll{}:
       Rel.all(S.Store.values(prim), C.Obj.namespace(o))
+    case RAnnotated{nk, vk}:
+      Rel.annotated(o, nk, vk, res)
 
 # Folding a watcher's outputs
 # ---------------------------
@@ -286,14 +312,31 @@ def Fold.rel.keys(+r: Rel, +res: C.Res, m: Maybe<&2, J.Json>, +prim: S.Store) ->
     case None{}:
       Nil{}
 
-def Fold.rel.with(+r: Rel, +res: C.Res, +o: W.Out, +prim: S.Store, +s: S.Store,
-  ks: List<&2, String>, m: Maybe<&2, J.Json>) -> Fold:
-  match m:
-    case Some{+x}:
+def Fold.rel.hit(+r: Rel, +res: C.Res, +o: W.Out, +prim: S.Store, +s: S.Store,
+  ks: List<&2, String>, +x: J.Json, hit: Bool) -> Fold:
+  match hit:
+    case True{}:
       Fold{S.Store.apply(s, o),
         List.append(&2, String, Rel.keys(r, res, x, prim),
           List.append(&2, String, Fold.rel.keys(r, res, S.Store.get(s, C.Obj.key(x)), prim), ks)),
         Nil{}}
+    case False{}:
+      Fold{S.Store.apply(s, o), ks, Nil{}}
+
+def Out.is_delete(o: W.Out) -> Bool:
+  match o:
+    case W.ODelete{x}:
+      True{}
+    case _:
+      False{}
+
+# A change triggers when it is a deletion or passes the watch's predicates.
+def Fold.rel.with(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +prim: S.Store, +s: S.Store,
+  ks: List<&2, String>, m: Maybe<&2, J.Json>) -> Fold:
+  match m:
+    case Some{+x}:
+      Fold.rel.hit(r, res, o, prim, s, ks, x,
+        Bool.or(Out.is_delete(o), Pred.passes(ps, S.Store.get(s, C.Obj.key(x)), x)))
     case None{}:
       Fold{S.Store.apply(s, o), ks, Nil{}}
 
@@ -308,14 +351,14 @@ def Fold.rel.dropped(+r: Rel, +res: C.Res, ds: List<&2, String>, +s: S.Store, +p
       List.append(&2, String, Fold.rel.keys(r, res, S.Store.get(s, k), prim),
         Fold.rel.dropped(r, res, t, s, prim))
 
-def Fold.rel.one.go(+r: Rel, +res: C.Res, +o: W.Out, +prim: S.Store, +s: S.Store, ks: List<&2, String>,
-  done: Bool) -> Fold:
+def Fold.rel.one.go(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +prim: S.Store, +s: S.Store,
+  ks: List<&2, String>, done: Bool) -> Fold:
   match done:
     case True{}:
       Fold{S.Store.apply(s, o),
         List.append(&2, String, Fold.rel.dropped(r, res, S.Store.dropped(s), s, prim), ks), Nil{}}
     case False{}:
-      Fold.rel.with(r, res, o, prim, s, ks, Out.obj(o))
+      Fold.rel.with(r, ps, res, o, prim, s, ks, Out.obj(o))
 
 def Out.is_done(o: W.Out) -> Bool:
   match o:
@@ -324,19 +367,25 @@ def Out.is_done(o: W.Out) -> Bool:
     case _:
       False{}
 
-def Fold.rel.one(+r: Rel, +res: C.Res, +o: W.Out, +prim: S.Store, f: Fold) -> Fold:
+def Fold.rel.one(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, +o: W.Out, +prim: S.Store, f: Fold) -> Fold:
   match f:
     case Fold{+s, ks, g}:
-      Fold.rel.one.go(r, res, o, prim, s, ks, Out.is_done(o))
+      Fold.rel.one.go(r, ps, res, o, prim, s, ks, Out.is_done(o))
 
-# A related watch's outputs: every change triggers the primaries its
-# relation maps the object to, as cached before and as it is now.
-def Fold.rel(+r: Rel, +res: C.Res, outs: List<&2, W.Out>, +prim: S.Store, f: Fold) -> Fold:
+# A related watch's outputs: every change that passes the watch's
+# predicates (ps; Nil passes all) triggers the primaries its relation maps
+# the object to, as cached before and as it is now.
+def Fold.rel_where(+r: Rel, +ps: List<&2, Pred>, +res: C.Res, outs: List<&2, W.Out>, +prim: S.Store,
+  f: Fold) -> Fold:
   match outs:
     case Nil{}:
       f
     case Con{+o, t}:
-      Fold.rel(r, res, t, prim, Fold.rel.one(r, res, o, prim, f))
+      Fold.rel_where(r, ps, res, t, prim, Fold.rel.one(r, ps, res, o, prim, f))
+
+# Fold.rel_where without predicates: every change triggers.
+def Fold.rel(+r: Rel, +res: C.Res, outs: List<&2, W.Out>, +prim: S.Store, f: Fold) -> Fold:
+  Fold.rel_where(r, Nil{}, res, outs, prim, f)
 
 # Controller specs
 # ----------------
@@ -344,7 +393,8 @@ def Fold.rel(+r: Rel, +res: C.Res, outs: List<&2, W.Out>, +prim: S.Store, f: Fol
 # A related watch: what to watch (and its label selector), and how its
 # objects map to primaries.
 type Sec is Data:
-  Sec{api: C.Api, label: String, field: String, rel: Rel, drop: List<&2, String>}
+  Sec{api: C.Api, label: String, field: String, rel: Rel, drop: List<&2, String>, preds: List<&2, Pred>,
+    cluster: Maybe<&2, K.Config>}
 
 # A controller (kube-runtime's Controller::new(..).owns(..).watches(..)):
 # the primary with its label and field selectors, the predicates its
@@ -352,34 +402,34 @@ type Sec is Data:
 # how long one may run (timeout ms, 0 for no limit).
 type Spec is Data:
   Spec{primary: C.Api, label: String, field: String, preds: List<&2, Pred>, secs: List<&2, Sec>,
-    max: U32, timeout: U32}
+    max: U32, timeout: U32, cluster: Maybe<&2, K.Config>}
 
 # A controller for primary: every change, no related watches, 8 at once,
 # no timeout.
 def Spec.of(primary: C.Api) -> Spec:
-  Spec{primary, "", "", Nil{}, Nil{}, 8, 0}
+  Spec{primary, "", "", Nil{}, Nil{}, 8, 0, None{}}
 
 def Spec.label(s: Spec, l: String) -> Spec:
   match s:
-    case Spec{p, x, fs, ps, ss, m, to}:
-      Spec{p, l, fs, ps, ss, m, to}
+    case Spec{p, x, fs, ps, ss, m, to, cl}:
+      Spec{p, l, fs, ps, ss, m, to, cl}
 
 # The primary's field selector (for example "metadata.name=x").
 def Spec.field(s: Spec, f: String) -> Spec:
   match s:
-    case Spec{p, l, x, ps, ss, m, to}:
-      Spec{p, l, f, ps, ss, m, to}
+    case Spec{p, l, x, ps, ss, m, to, cl}:
+      Spec{p, l, f, ps, ss, m, to, cl}
 
 def Spec.filter(s: Spec, ps: List<&2, Pred>) -> Spec:
   match s:
-    case Spec{p, l, fs, x, ss, m, to}:
-      Spec{p, l, fs, ps, ss, m, to}
+    case Spec{p, l, fs, x, ss, m, to, cl}:
+      Spec{p, l, fs, ps, ss, m, to, cl}
 
 # At least 1.
 def Spec.max(s: Spec, n: U32) -> Spec:
   match s:
-    case Spec{p, l, fs, ps, ss, x, to}:
-      Spec{p, l, fs, ps, ss, U32.max(n, 1), to}
+    case Spec{p, l, fs, ps, ss, x, to, cl}:
+      Spec{p, l, fs, ps, ss, U32.max(n, 1), to, cl}
 
 # A reconcile still running after ms is hung: the process logs it and
 # exits (status 1), so the pod restarts, as a crash would. A reconcile in
@@ -387,15 +437,15 @@ def Spec.max(s: Spec, n: U32) -> Spec:
 # let the same key run twice.
 def Spec.timeout(s: Spec, ms: U32) -> Spec:
   match s:
-    case Spec{p, l, fs, ps, ss, m, x}:
-      Spec{p, l, fs, ps, ss, m, ms}
+    case Spec{p, l, fs, ps, ss, m, x, cl}:
+      Spec{p, l, fs, ps, ss, m, ms, cl}
 
 # Adds a related watch with label and field selectors ("" for none); the
 # n-th one added is cache n (Ctx.cache).
 def Spec.watches_where(s: Spec, a: C.Api, label: String, field: String, r: Rel) -> Spec:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
-      Spec{p, l, fs, ps, List.append(&2, Sec, ss, [Sec{a, label, field, r, Nil{}}]), m, to}
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
+      Spec{p, l, fs, ps, List.append(&2, Sec, ss, [Sec{a, label, field, r, Nil{}, Nil{}, None{}}]), m, to, cl}
 
 def Spec.watches(s: Spec, a: C.Api, r: Rel) -> Spec:
   Spec.watches_where(s, a, "", "", r)
@@ -407,12 +457,12 @@ def Spec.owns(s: Spec, a: C.Api) -> Spec:
 
 def Spec.primary(s: Spec) -> C.Api:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
       p
 
 def Spec.res(s: Spec) -> C.Res:
   match s:
-    case Spec{C.Api{r, sc}, l, fs, ps, ss, m, to}:
+    case Spec{C.Api{r, sc}, l, fs, ps, ss, m, to, cl}:
       r
 
 def Spec.kind(s: Spec) -> String:
@@ -420,50 +470,50 @@ def Spec.kind(s: Spec) -> String:
 
 def Spec.preds(s: Spec) -> List<&2, Pred>:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
       ps
 
 def Spec.secs(s: Spec) -> List<&2, Sec>:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
       ss
 
 def Spec.max_of(s: Spec) -> U32:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
       m
 
 def Spec.label_of(s: Spec) -> String:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
       l
 
 def Spec.field_of(s: Spec) -> String:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
       fs
 
 def Spec.timeout_of(s: Spec) -> U32:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
       to
 
 def Sec.rel(s: Sec) -> Rel:
   match s:
-    case Sec{a, l, f, r, d}:
+    case Sec{a, l, f, r, d, ps, c}:
       r
 
 def Sec.drop(s: Sec) -> List<&2, String>:
   match s:
-    case Sec{a, l, f, r, d}:
+    case Sec{a, l, f, r, d, ps, c}:
       d
 
 def Secs.set_last(ss: List<&2, Sec>, +d: List<&2, String>) -> List<&2, Sec>:
   match ss:
     case Nil{}:
       Nil{}
-    case Con{Sec{a, l, f, r, x}, Nil{}}:
-      [Sec{a, l, f, r, d}]
+    case Con{Sec{a, l, f, r, x, ps, c}, Nil{}}:
+      [Sec{a, l, f, r, d, ps, c}]
     case Con{x, t}:
       x <> Secs.set_last(t, d)
 
@@ -474,8 +524,106 @@ def Secs.set_last(ss: List<&2, Sec>, +d: List<&2, String>) -> List<&2, Sec>:
 # Client.get.
 def Spec.drop(s: Spec, fields: List<&2, String>) -> Spec:
   match s:
-    case Spec{p, l, fs, ps, ss, m, to}:
-      Spec{p, l, fs, ps, Secs.set_last(ss, fields), m, to}
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
+      Spec{p, l, fs, ps, Secs.set_last(ss, fields), m, to, cl}
+
+def Secs.filter_last(ss: List<&2, Sec>, +ps: List<&2, Pred>) -> List<&2, Sec>:
+  match ss:
+    case Nil{}:
+      Nil{}
+    case Con{Sec{a, l, f, r, d, x, c}, Nil{}}:
+      [Sec{a, l, f, r, d, ps, c}]
+    case Con{x, t}:
+      x <> Secs.filter_last(t, ps)
+
+def Secs.on_last(ss: List<&2, Sec>, +c: K.Config) -> List<&2, Sec>:
+  match ss:
+    case Nil{}:
+      Nil{}
+    case Con{Sec{a, l, f, r, d, ps, x}, Nil{}}:
+      [Sec{a, l, f, r, d, ps, Some{K.Config.without_pool(c)}}]
+    case Con{x, t}:
+      x <> Secs.on_last(t, c)
+
+# Filters the related watch added last (kube-runtime's predicate_filter on
+# a watches() stream): a change to one of its objects triggers its
+# primaries only when what the predicates see differs from the cached
+# object (or nothing is cached). Deletions, relists that drop an object,
+# a new uid, the start of a deletion and a change of finalizers always
+# pass, as for the primary. With no predicates (the default), every change
+# triggers.
+def Spec.watch_filter(s: Spec, ps: List<&2, Pred>) -> Spec:
+  match s:
+    case Spec{p, l, fs, x, ss, m, to, cl}:
+      Spec{p, l, fs, x, Secs.filter_last(ss, ps), m, to, cl}
+
+# Runs the related watch added last against another cluster: c, not the
+# controller's config. Its objects map to primaries as any related
+# watch's do, and Ctx.cluster(ctx, n) hands the reconcile the same config.
+# c keeps its rate limit (Kube.connect adds one) but not its connection
+# pool: a pool holds connections to one server, so Kube.control gives each
+# such config a pool of its own. Under leader election c also takes the
+# controllers' leadership fence, so no request to any cluster outlives
+# the lease.
+def Spec.watch_on(s: Spec, c: K.Config) -> Spec:
+  match s:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
+      Spec{p, l, fs, ps, Secs.on_last(ss, c), m, to, cl}
+
+# Watches the primary on another cluster: c, not the controller's config
+# (which still holds the lease and serves Ctx.cfg). Ctx.cluster(ctx, 0) is
+# c, fenced as Spec.watch_on says.
+def Spec.on(s: Spec, c: K.Config) -> Spec:
+  match s:
+    case Spec{p, l, fs, ps, ss, m, to, x}:
+      Spec{p, l, fs, ps, ss, m, to, Some{K.Config.without_pool(c)}}
+
+# The reconcile timeout, ms (0 for none) a spec without its own takes
+# (Opts.with_timeout): a spec's own timeout wins.
+def Spec.timeout_or(s: Spec, +ms: U32) -> Spec:
+  match s:
+    case Spec{p, l, fs, ps, ss, m, 0, cl}:
+      Spec{p, l, fs, ps, ss, m, ms, cl}
+    case x:
+      x
+
+def Spec.cluster_of(s: Spec) -> Maybe<&2, K.Config>:
+  match s:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
+      cl
+
+def Sec.preds(s: Sec) -> List<&2, Pred>:
+  match s:
+    case Sec{a, l, f, r, d, ps, c}:
+      ps
+
+def Sec.cluster(s: Sec) -> Maybe<&2, K.Config>:
+  match s:
+    case Sec{a, l, f, r, d, ps, c}:
+      c
+
+# The config a watch runs against: the controllers' own (main), or
+# another cluster's, under main's leadership fence.
+def Cluster.of(+main: K.Config, m: Maybe<&2, K.Config>) -> K.Config:
+  match m:
+    case None{}:
+      main
+    case Some{c}:
+      K.Config.fence_as(c, K.Config.fence(main))
+
+def Cluster.secs(ss: List<&2, Sec>, +main: K.Config) -> List<&2, K.Config>:
+  match ss:
+    case Nil{}:
+      Nil{}
+    case Con{s, t}:
+      Cluster.of(main, Sec.cluster(s)) <> Cluster.secs(t, main)
+
+# Every watch's config, the primary's first, then each related watch's in
+# the order they were added.
+def Spec.clusters(s: Spec, +main: K.Config) -> List<&2, K.Config>:
+  match s:
+    case Spec{p, l, fs, ps, ss, m, to, cl}:
+      Cluster.of(main, cl) <> Cluster.secs(ss, main)
 
 def Out.trim.obj(fs: List<&2, String>, +x: J.Json) -> J.Json:
   match fs:
@@ -523,40 +671,49 @@ type Meter is Data:
 # in the order they were added (Ctx.cache(c, 1) is the first); fails: how
 # many times in a row this key's reconcile has failed (0 after a success),
 # so a reconcile can escalate or give up; meter: where the controller's own
-# metrics go (Metrics.add, Metrics.set), None outside Kube.control.
+# metrics go (Metrics.add, Metrics.set), None outside Kube.control;
+# clusters: each watch's config, the primary's first (Ctx.cluster).
 type Ctx is Data:
   Ctx{cfg: K.Config, idx: U32, store: S.Store, caches: List<&2, S.Store>, fails: U32,
-    meter: Maybe<&2, Chan(Meter)>}
+    meter: Maybe<&2, Chan(Meter)>, clusters: List<&2, K.Config>}
 
 def Ctx.cfg(c: Ctx) -> K.Config:
   match c:
-    case Ctx{cfg, i, s, cs, fl, mt}:
+    case Ctx{cfg, i, s, cs, fl, mt, cl}:
       cfg
 
 def Ctx.idx(c: Ctx) -> U32:
   match c:
-    case Ctx{cfg, i, s, cs, fl, mt}:
+    case Ctx{cfg, i, s, cs, fl, mt, cl}:
       i
 
 def Ctx.store(c: Ctx) -> S.Store:
   match c:
-    case Ctx{cfg, i, s, cs, fl, mt}:
+    case Ctx{cfg, i, s, cs, fl, mt, cl}:
       s
 
 def Ctx.with_fails(c: Ctx, n: U32) -> Ctx:
   match c:
-    case Ctx{cfg, i, s, cs, fl, mt}:
-      Ctx{cfg, i, s, cs, n, mt}
+    case Ctx{cfg, i, s, cs, fl, mt, cl}:
+      Ctx{cfg, i, s, cs, n, mt, cl}
 
 def Ctx.meter(c: Ctx) -> Maybe<&2, Chan(Meter)>:
   match c:
-    case Ctx{cfg, i, s, cs, fl, mt}:
+    case Ctx{cfg, i, s, cs, fl, mt, cl}:
       mt
 
 def Ctx.fails(c: Ctx) -> U32:
   match c:
-    case Ctx{cfg, i, s, cs, fl, mt}:
+    case Ctx{cfg, i, s, cs, fl, mt, cl}:
       fl
+
+# The config of watch n: 0 the primary's, n the n-th related watch's (as
+# Ctx.cache counts); the controller's own (Ctx.cfg) unless the spec put
+# the watch on another cluster (Spec.on, Spec.watch_on).
+def Ctx.cluster(c: Ctx, n: U32) -> K.Config:
+  match c:
+    case Ctx{cfg, i, s, cs, fl, mt, cl}:
+      Maybe.default(&2, K.Config, List.get(&2, K.Config, cl, U32.to_nat(n)), cfg)
 
 # The cached primary under a key ("ns/name", or "name").
 def Ctx.get(c: Ctx, key: String) -> Maybe<&2, J.Json>:
@@ -578,7 +735,7 @@ def Ctx.nth(cs: List<&2, S.Store>, n: Nat) -> S.Store:
 # The cache of the n-th related watch (from 1); empty if there is none.
 def Ctx.cache(c: Ctx, n: U32) -> S.Store:
   match c:
-    case Ctx{cfg, i, s, cs, fl, mt}:
+    case Ctx{cfg, i, s, cs, fl, mt, cl}:
       Ctx.nth(cs, U32.to_nat((n - 1 : U32)))
 
 # A cached related object under a key.
