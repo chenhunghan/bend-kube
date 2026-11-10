@@ -187,7 +187,10 @@ python3 -I -c "import json; print(json.dumps({'apiVersion':'admission.k8s.io/v1'
   | grep -q '"uid":"big","allowed":true' && pass "native: a 2 MB review" || fail "native: big review"
 # A client that handshakes, sends half a request and closes cleanly
 # (close_notify) must cost nothing afterwards: no spinning read.
-cpu() { ps -o time= -p "$wh_pid" | awk -F'[:.]' '{ print ($1 * 60 + $2) * 100 + $3 }'; }
+cpu() {  # the server's CPU time so far, in hundredths of a second
+  if [ -r "/proc/$wh_pid/stat" ]; then awk '{ print $14 + $15 }' "/proc/$wh_pid/stat"  # clock ticks (100/s)
+  else ps -o time= -p "$wh_pid" | awk -F'[:.]' '{ print ($1 * 60 + $2) * 100 + $3 }'; fi
+}
 python3 -I - "$W" <<'PY'
 import socket, ssl, sys
 w = sys.argv[1]
