@@ -191,9 +191,11 @@ transforms kube-rs and controller-runtime users apply by hand.
   - The default is no limit, as in controller-runtime and kube-runtime.
     `Kb.Opts.with_timeout(o, ms)` sets one for every spec that sets none
     (controller-runtime's manager-wide `ReconciliationTimeout`); a spec's
-    own wins. Each limit holds a sleeper until it expires,
-    even after the reconcile finishes, so a five-minute timeout at 100
-    reconciles a second holds 30,000 sleepers.
+    own wins.
+  - One watchdog per controller keeps the timeout: each reconcile tells it
+    when it starts and ends, and it checks on each message and at least
+    once a second. A timeout costs two channel sends per reconcile, not a
+    sleeper per reconcile, and fires within about a second of its deadline.
   - Without a limit, a hung reconcile holds its slot.
     `bendkube_reconcile_running` stuck at the maximum shows it.
 - **Reconcile context:** `ctx` gives:

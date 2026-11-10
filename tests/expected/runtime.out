@@ -24,3 +24,4 @@ tokens in the first second (a fraction carries over) at qps 1, 3, 7, 50, 75, 333
 watches across clusters: /api/v1/configmaps@main x2 /api/v1/configmaps@host x2 /api/v1/pods@host x1
 pools for other clusters: https://far:443 https://host:443
 a server in logs: https://10.0.0.1:443 (kubernetes.default.svc)
+watchdog, 2s timeout: at 2500 -; at 3001 ns/a; nothing running -; across the clock's wrap - then ns/w

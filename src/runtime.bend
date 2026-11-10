@@ -382,9 +382,15 @@ type CState is Data:
   CState{store: S.Store, caches: List<&2, S.Store>, queue: Q.Queue, stats: Stats,
     stop: Maybe<&2, Chan(Unit)>, tim: Tim}
 
+# The watchdog's inbox: a reconcile of key started at t0 (monotonic ms),
+# or ended.
+type Dog is Data:
+  WdStart{key: String, t0: U32}
+  WdEnd{key: String}
+
 type CCtx is Data:
   CCtx{cfg: K.Config, spec: X.Spec, chan: Chan(Msg), status: Chan(SMsg), idx: U32,
-    meter: Chan(X.Meter)}
+    meter: Chan(X.Meter), dog: Maybe<&2, Chan(Dog)>}
 
 # A reconcile to start: the key and the object the store holds for it.
 type Job is Data:
@@ -855,22 +861,22 @@ def Ctl.snap(st: CState, name: String) -> Snap:
 
 def CCtx.status(c: CCtx) -> Chan(SMsg):
   match c:
-    case CCtx{cfg, sp, ch, st, ix, mt}:
+    case CCtx{cfg, sp, ch, st, ix, mt, dg}:
       st
 
 def CCtx.idx(c: CCtx) -> U32:
   match c:
-    case CCtx{cfg, sp, ch, st, ix, mt}:
+    case CCtx{cfg, sp, ch, st, ix, mt, dg}:
       ix
 
 def CCtx.spec(c: CCtx) -> X.Spec:
   match c:
-    case CCtx{cfg, sp, ch, st, ix, mt}:
+    case CCtx{cfg, sp, ch, st, ix, mt, dg}:
       sp
 
 def CCtx.meter(c: CCtx) -> Chan(X.Meter):
   match c:
-    case CCtx{cfg, sp, ch, st, ix, mt}:
+    case CCtx{cfg, sp, ch, st, ix, mt, dg}:
       mt
 
 def CCtx.kind(c: CCtx) -> String:
@@ -893,7 +899,7 @@ def Ctl.publish(+st: CState, +ctx: CCtx, due: Bool) -> IO(CState):
 
 def CCtx.chan(c: CCtx) -> Chan(Msg):
   match c:
-    case CCtx{cfg, sp, ch, st, ix, mt}:
+    case CCtx{cfg, sp, ch, st, ix, mt, dg}:
       ch
 
 # At idle: publish, or arm the tick, then wait for the next message.
@@ -939,9 +945,14 @@ def Ctl.sleeps(ss: List<&2, Sleep>, +chan: Chan(Msg)) -> IO(Unit):
               u => Chan.send(Msg, chan, MWake{key, due})))),
         u => Ctl.sleeps(t, chan))
 
+def CCtx.dog(c: CCtx) -> Maybe<&2, Chan(Dog)>:
+  match c:
+    case CCtx{cfg, sp, ch, st, ix, mt, dg}:
+      dg
+
 def CCtx.cfg(c: CCtx) -> K.Config:
   match c:
-    case CCtx{cfg, sp, ch, st, ix, mt}:
+    case CCtx{cfg, sp, ch, st, ix, mt, dg}:
       cfg
 
 # What a reconcile sees: the config, the controller's index and the caches.
@@ -969,55 +980,141 @@ def Ctl.report(+key: String, +kind: String, a: Q.Action) -> IO(Unit):
 def Ctl.mono() -> IO(U32):
   IO.bind(Nat, U32, IO.now(), n => IO.pure(U32, U32.from_nat(n)))
 
+# Watchdog
+# --------
+#
+# A controller with a reconcile timeout keeps one watchdog: each reconcile
+# tells it when it starts and ends, and it exits the process when one has
+# run past the timeout. It wakes on each message and at least once a
+# second, so it fires within about a second of the deadline, and it holds
+# one waiter, not a sleeper per reconcile that lives the whole timeout.
+
+def Dog.over.go(+d: U32, +to: U32) -> Bool:
+  Bool.and(U32.is_gt(d, to), U32.is_lt(d, 2147483648))
+
+# Whether a reconcile started at t0 has run past to ms at now. Wrap-safe:
+# a start that reads as later than now (a difference of 2^31 ms or more)
+# has not run at all.
+def Dog.over(+now: U32, +t0: U32, +to: U32) -> Bool:
+  Dog.over.go((now - t0 : U32), to)
+
+def Dog.pick(+k: String, hit: Bool, rest: Maybe<&2, String>) -> Maybe<&2, String>:
+  match hit:
+    case True{}:
+      Some{k}
+    case False{}:
+      rest
+
+def Dog.late.go(ks: List<&2, String>, +m: Map<&2, U32>, +now: U32, +to: U32) -> Maybe<&2, String>:
+  match ks:
+    case Nil{}:
+      None{}
+    case Con{+k, t}:
+      Dog.pick(k, Dog.over(now, Q.Mp.get(m, k), to), Dog.late.go(t, m, now, to))
+
+# A running reconcile past its timeout, if any: running maps keys to their
+# start times.
+def Dog.late(+running: Map<&2, U32>, +now: U32, +to: U32) -> Maybe<&2, String>:
+  Dog.late.go(Map.keys(&2, U32, running), running, now, to)
+
+type DogEv is Type:
+  DWait{}
+  DGot{p: Poll<&1, &1, Maybe<&1, Dog>, Unit>}
+  DTime{}
+  DNow{now: U32}
+  DLate{key: Maybe<&2, String>}
+
+def Dog.run(outer: Nat, fuel: Nat, ev: DogEv, +running: Map<&2, U32>, +to: U32, +inbox: Chan(Dog),
+  +kind: String) -> IO(Unit):
+  match outer fuel ev:
+    case 0n 0n e:
+      Loop.spent("Dog.run")
+    case 1n+o 0n e:
+      Dog.run(o, 4294967295n, e, running, to, inbox, kind)
+    case o 1n+f DWait{}:
+      IO.bind(Poll<&1, &1, Maybe<&1, Dog>, Unit>, Unit, Chan.try_recv(Dog, inbox, 1000),
+        p => Dog.run(o, f, DGot{p}, running, to, inbox, kind))
+    case o 1n+f DGot{Ready{Some{WdStart{k, t0}}}}:
+      Dog.run(o, f, DTime{}, Map.set(&2, U32, running, k, t0), to, inbox, kind)
+    case o 1n+f DGot{Ready{Some{WdEnd{k}}}}:
+      Dog.run(o, f, DTime{}, Map.del(&2, U32, running, k), to, inbox, kind)
+    case o 1n+f DGot{Ready{None{}}}:
+      IO.pure(Unit, Unit{})
+    case o 1n+f DGot{Wait{u}}:
+      Dog.run(o, f, DTime{}, running, to, inbox, kind)
+    case o 1n+f DTime{}:
+      IO.bind(U32, Unit, Ctl.mono(), now => Dog.run(o, f, DNow{now}, running, to, inbox, kind))
+    case o 1n+f DNow{+now}:
+      Dog.run(o, f, DLate{Dog.late(running, now, to)}, running, to, inbox, kind)
+    case o 1n+f DLate{None{}}:
+      Dog.run(o, f, DWait{}, running, to, inbox, kind)
+    case o 1n+f DLate{Some{k}}:
+      IO.bind(Unit, Unit, L.Log.error("reconcile hung past its timeout; exiting so the pod restarts",
+        [L.Log.kv("controller", kind), L.Log.kv("key", k), L.Log.kv("timeout_ms", U32.show(to))]),
+        u => IO.die(Unit, 1, "reconcile hung"))
+
+def Dog.start.go(+to: U32, +kind: String, off: Bool) -> IO(Maybe<&2, Chan(Dog)>):
+  match off:
+    case True{}:
+      IO.pure(Maybe<&2, Chan(Dog)>, None{})
+    case False{}:
+      IO.bind(Chan(Dog), Maybe<&2, Chan(Dog)>, Chan.new(Dog, 4096),
+        +c => IO.bind(Unit, Maybe<&2, Chan(Dog)>,
+          IO.spawn(Unit, Dog.run(4294967295n, 4294967295n, DWait{}, Map.new(&2, U32), to, c, kind)),
+          u => IO.pure(Maybe<&2, Chan(Dog)>, Some{c})))
+
+# The watchdog of a controller whose reconciles time out after to ms (0:
+# none, and no watchdog).
+def Dog.start(+to: U32, +kind: String) -> IO(Maybe<&2, Chan(Dog)>):
+  Dog.start.go(to, kind, U32.is_eq(to, 0))
+
 def Ctl.job.end(+key: String, +a: Q.Action, +t0: U32, +kind: String, +chan: Chan(Msg)) ->
   IO(Result<&1, &1, Msg, Unit>):
   IO.bind(U32, Result<&1, &1, Msg, Unit>, Ctl.mono(),
     +t1 => IO.bind(Unit, Result<&1, &1, Msg, Unit>, Ctl.report(key, kind, a),
       u => Chan.send(Msg, chan, MDone{key, a, (t1 - t0 : U32)})))
 
-def Ctl.hung(+key: String, +to: U32, m: Maybe<&1, Q.Action>) -> IO(Q.Action):
-  match m:
-    case Some{a}:
-      IO.pure(Q.Action, a)
-    case None{}:
-      IO.bind(Unit, Q.Action, L.Log.error("reconcile hung past its timeout; exiting so the pod restarts",
-        [L.Log.kv("key", key), L.Log.kv("timeout_ms", U32.show(to))]), u => IO.die(Q.Action, 1, "reconcile hung"))
+def Ctl.guarded(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx,
+  +d: Chan(Dog), +t0: U32) -> IO(Q.Action):
+  IO.bind(Result<&1, &1, Dog, Unit>, Q.Action, Chan.send(Dog, d, WdStart{key, t0}),
+    u => IO.bind(Q.Action, Q.Action, rec(o, ctx),
+      a => IO.bind(Result<&1, &1, Dog, Unit>, Q.Action, Chan.send(Dog, d, WdEnd{key}),
+        u2 => IO.pure(Q.Action, a))))
 
-# The reconcile itself, raced against its timeout when it has one.
-# A reconcile that outlives its timeout exits the process: it cannot be
+# The reconcile itself, watched by the controller's watchdog when it has a
+# timeout. A reconcile that outlives it exits the process: it cannot be
 # cancelled, and freeing its key while it runs would run the key twice.
-def Ctl.call(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx, +to: U32,
-  unbounded: Bool) -> IO(Q.Action):
-  match unbounded:
-    case True{}:
+def Ctl.call(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx,
+  dog: Maybe<&2, Chan(Dog)>, +t0: U32) -> IO(Q.Action):
+  match dog:
+    case None{}:
       rec(o, ctx)
-    case False{}:
-      IO.bind(Maybe<&1, Q.Action>, Q.Action, IO.within(Q.Action, to, rec(o, ctx)),
-        m => Ctl.hung(key, to, m))
+    case Some{d}:
+      Ctl.guarded(~rec, key, o, ctx, d, t0)
 
 def Ctl.job.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx,
-  +kind: String, +chan: Chan(Msg), +to: U32, +t0: U32) -> IO(Result<&1, &1, Msg, Unit>):
-  IO.bind(Q.Action, Result<&1, &1, Msg, Unit>, Ctl.call(~rec, key, o, ctx, to, U32.is_eq(to, 0)),
+  +kind: String, +chan: Chan(Msg), +dog: Maybe<&2, Chan(Dog)>, +t0: U32) -> IO(Result<&1, &1, Msg, Unit>):
+  IO.bind(Q.Action, Result<&1, &1, Msg, Unit>, Ctl.call(~rec, key, o, ctx, dog, t0),
     a => Ctl.job.end(key, a, t0, kind, chan))
 
 # A reconcile, timed; a failure is logged; MDone answers on the channel.
 def Ctl.job(~rec: J.Json -> X.Ctx -> IO(Q.Action), +key: String, o: J.Json, +ctx: X.Ctx,
-  +kind: String, +chan: Chan(Msg), +to: U32) -> IO(Result<&1, &1, Msg, Unit>):
+  +kind: String, +chan: Chan(Msg), +dog: Maybe<&2, Chan(Dog)>) -> IO(Result<&1, &1, Msg, Unit>):
   IO.bind(U32, Result<&1, &1, Msg, Unit>, Ctl.mono(),
-    t0 => Ctl.job.go(~rec, key, o, ctx, kind, chan, to, t0))
+    t0 => Ctl.job.go(~rec, key, o, ctx, kind, chan, dog, t0))
 
 # Starts a reconcile per job, each with the caches and its key's failure
 # count; each answers MDone on the channel.
 def Ctl.spawn(~rec: J.Json -> X.Ctx -> IO(Q.Action), jobs: List<&2, Job>, +chan: Chan(Msg),
-  +ctx: X.Ctx, +kind: String, +to: U32) -> IO(Unit):
+  +ctx: X.Ctx, +kind: String, +dog: Maybe<&2, Chan(Dog)>) -> IO(Unit):
   match jobs:
     case Nil{}:
       IO.pure(Unit, Unit{})
     case Con{Job{key, o, fl}, t}:
       IO.bind(Unit, Unit,
         IO.spawn(Result<&1, &1, Msg, Unit>,
-          Ctl.job(~rec, key, o, X.Ctx.with_fails(ctx, fl), kind, chan, to)),
-        u => Ctl.spawn(~rec, t, chan, ctx, kind, to))
+          Ctl.job(~rec, key, o, X.Ctx.with_fails(ctx, fl), kind, chan, dog)),
+        u => Ctl.spawn(~rec, t, chan, ctx, kind, dog))
 
 # The controller loop: a message in, the state stepped, timers armed,
 # reconciles started, the next message awaited; a stop request is answered
@@ -1041,7 +1138,7 @@ def Ctl.run(~rec: J.Json -> X.Ctx -> IO(Q.Action), outer: Nat, fuel: Nat, ev: CE
         u => Ctl.run(~rec, o, f, CDisp{Ctl.dispatch(st1)}, st1, ctx))
     case o 1n+f CDisp{(+st2, jobs)}:
       IO.bind(Unit, Unit, Ctl.spawn(~rec, jobs, CCtx.chan(ctx), Ctl.ctx(st2, ctx), CCtx.kind(ctx),
-        X.Spec.timeout_of(CCtx.spec(ctx))),
+        CCtx.dog(ctx)),
         u => IO.bind(CState, Unit, Ctl.publish(st2, ctx, Ctl.snap_due(st2)),
           +st3 => Ctl.run(~rec, o, f, CNext{Ctl.halt(st3)}, st3, ctx)))
     case o 1n+f CNext{Some{r}}:
@@ -1109,15 +1206,21 @@ def Keeper.start() -> IO(Chan(SMsg)):
       IO.bind(Maybe<&1, SMsg>, Unit, Chan.recv(SMsg, c),
         x => Keeper.run(4294967295n, 4294967295n, x, Map.new(&2, Snap), c))), u => IO.pure(Chan(SMsg), c)))
 
-def Ctl.loop(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +spec: X.Spec,
-  +chan: Chan(Msg), +status: Chan(SMsg), +meter: Chan(X.Meter), +idx: U32) -> IO(Unit):
+def Ctl.loop.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +spec: X.Spec,
+  +chan: Chan(Msg), +status: Chan(SMsg), +meter: Chan(X.Meter), +idx: U32, dog: Maybe<&2, Chan(Dog)>) ->
+  IO(Unit):
   Ctl.run(~rec, 4294967295n, 4294967295n,
     CDisp{(CState{S.Store.new(),
       List.replicate(S.Store, List.length(&2, X.Sec, X.Spec.secs(spec)), S.Store.new()),
       Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}}, None{}, Tim.new()}, Nil{})},
     CState{S.Store.new(), Nil{}, Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}},
       None{}, Tim.new()},
-    CCtx{cfg, spec, chan, status, idx, meter})
+    CCtx{cfg, spec, chan, status, idx, meter, dog})
+
+def Ctl.loop(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +spec: X.Spec,
+  +chan: Chan(Msg), +status: Chan(SMsg), +meter: Chan(X.Meter), +idx: U32) -> IO(Unit):
+  IO.bind(Maybe<&2, Chan(Dog)>, Unit, Dog.start(X.Spec.timeout_of(spec), X.Spec.kind(spec)),
+    dog => Ctl.loop.go(~rec, cfg, spec, chan, status, meter, idx, dog))
 
 def Controller.inbox() -> IO(Chan(Msg)):
   Chan.new(Msg, 4096)

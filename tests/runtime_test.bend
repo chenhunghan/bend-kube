@@ -178,6 +178,17 @@ def pool_plan() -> String:
     X.Spec.watches(X.Spec.of(cms()), cms(), X.RAll{}), kcfg("host")), pods(), X.RAll{}), kcfg("host")),
     kcfg("far")), X.Spec.of(pods())])))
 
+def late(m: Maybe<&2, String>) -> String:
+  match m:
+    case Some{k}:
+      k
+    case None{}:
+      "-"
+
+# Running reconciles by start time, for the watchdog.
+def running() -> Map<&2, U32>:
+  Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "ns/a", 1000), "ns/b", 4000)
+
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
   # (their objects deleted), the third is live: dispatch must reach it.
@@ -228,3 +239,7 @@ def main() -> IO(Unit):
     IO.print("watches across clusters:" ++ plan(ch))
     IO.print("pools for other clusters:" ++ pool_plan())
     IO.print("a server in logs: " ++ K.Config.server(K.Config.with_server_name(kcfg("10.0.0.1"), "kubernetes.default.svc")))
+    IO.print("watchdog, 2s timeout: at 2500 " ++ late(R.Dog.late(running(), 2500, 2000)) ++ "; at 3001 "
+      ++ late(R.Dog.late(running(), 3001, 2000)) ++ "; nothing running " ++ late(R.Dog.late(Map.new(&2, U32), 99999, 2000))
+      ++ "; across the clock's wrap " ++ late(R.Dog.late(Map.set(&2, U32, Map.new(&2, U32), "ns/w", 4294967000), 500, 2000))
+      ++ " then " ++ late(R.Dog.late(Map.set(&2, U32, Map.new(&2, U32), "ns/w", 4294967000), 2000, 2000)))

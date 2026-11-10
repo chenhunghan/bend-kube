@@ -170,6 +170,22 @@ grep -q "^stale replace_retry, 3 tries: ok a=retried" "$work/conflict.log" && [ 
   && pass "replace_retry re-reads after a 409 and lands" || fail "replace_retry: $(cat "$work/conflict.log")"
 grep -q "^replace_retry of a missing object: fail 404" "$work/conflict.log" && pass "replace_retry of a missing object fails with 404" || fail "replace_retry 404"
 
+echo "== reconcile timeout"
+(cd tests/fixtures && bend hang.bend -o "$work/hang") >/dev/null 2>&1 || fail "build hang"
+k create configmap quick --from-literal=ms=1000 >/dev/null; k label configmap quick bend-kube/hang=true >/dev/null
+KUBECONFIG="$work/kc.json" "$work/hang" > "$work/hang.log" 2>&1 &
+hang_pid=$!
+for _ in $(seq 1 30); do grep '"slept"' "$work/hang.log" | grep -q bend-e2e/quick && break; sleep 1; done
+sleep 3
+kill -0 "$hang_pid" 2>/dev/null && grep '"slept"' "$work/hang.log" | grep -q bend-e2e/quick \
+  && pass "a reconcile within its timeout finishes, and the process lives on" || fail "hang: quick: $(cat "$work/hang.log")"
+k create configmap stuck --from-literal=ms=30000 >/dev/null; k label configmap stuck bend-kube/hang=true >/dev/null
+code=0; for _ in $(seq 1 15); do kill -0 "$hang_pid" 2>/dev/null || break; sleep 1; done
+if kill -0 "$hang_pid" 2>/dev/null; then kill "$hang_pid"; fail "a hung reconcile did not exit the process"; fi
+wait "$hang_pid" || code=$?
+[ "$code" = 1 ] && grep '"reconcile hung past its timeout' "$work/hang.log" | grep -q bend-e2e/stuck \
+  && pass "a reconcile past its timeout exits the process with status 1" || fail "hang: exit $code: $(cat "$work/hang.log")"
+
 echo "== rate limit and drain"
 (cd tests/fixtures && bend slow.bend -o "$work/slow") >/dev/null 2>&1 || fail "build slow"
 k create configmap slow --from-literal=a=b >/dev/null; k label configmap slow bend-kube/slow=true >/dev/null
