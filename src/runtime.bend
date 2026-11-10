@@ -380,7 +380,7 @@ def Tim.new() -> Tim:
 
 type CState is Data:
   CState{store: S.Store, caches: List<&2, S.Store>, queue: Q.Queue, stats: Stats,
-    stop: Maybe<&2, Chan(Unit)>, tim: Tim}
+    stop: Maybe<&2, Chan(Unit)>, tim: Tim, maps: List<&2, X.Mapped>}
 
 # The watchdog's inbox: a reconcile of key started at t0 (monotonic ms),
 # or ended.
@@ -515,16 +515,25 @@ def Stats.done(x: Stats, a: Q.Action, +ms: U32) -> Stats:
       Stats{(r + 1 : U32), e, v, Hist.bump(h, Sum.sane(ms)), Sum.add(sm, Sum.sane(ms))}
 
 def Ctl.prim.put(cs: List<&2, S.Store>, q: Q.Queue, x: Stats, p: Maybe<&2, Chan(Unit)>, tm: Tim,
-  f: X.Fold) -> CState:
+  mq: List<&2, X.Mapped>, f: X.Fold) -> CState:
   match f:
     case X.Fold{s, ks, g}:
-      CState{s, cs, Q.Queue.forget_all(g, Q.Queue.add_all(ks, q)), x, p, tm}
+      CState{s, cs, Q.Queue.forget_all(g, Q.Queue.add_all(ks, q)), x, p, tm, mq}
 
+def Ctl.rel.split(+n: Nat, s: S.Store, cs: List<&2, S.Store>, c: S.Store, q: Q.Queue, x: Stats,
+  p: Maybe<&2, Chan(Unit)>, tm: Tim, mq: List<&2, X.Mapped>, sp: X.Split) -> CState:
+  match sp:
+    case X.Split{ks, os}:
+      CState{s, Caches.set(cs, n, c), Q.Queue.add_all(ks, q), x, p, tm, List.append(&2, X.Mapped, mq, os)}
+
+# A related watch's fold: its cache, the keys it triggers, and the objects
+# its relation leaves to the controller's mapper (RMap), kept for after the
+# fold (Ctl.map_all).
 def Ctl.rel.put(+n: Nat, s: S.Store, cs: List<&2, S.Store>, q: Q.Queue, x: Stats,
-  p: Maybe<&2, Chan(Unit)>, tm: Tim, f: X.Fold) -> CState:
+  p: Maybe<&2, Chan(Unit)>, tm: Tim, mq: List<&2, X.Mapped>, f: X.Fold) -> CState:
   match f:
     case X.Fold{c, ks, g}:
-      CState{s, Caches.set(cs, n, c), Q.Queue.add_all(ks, q), x, p, tm}
+      Ctl.rel.split(n, s, cs, c, q, x, p, tm, mq, X.Mapped.split(ks, U32.from_nat((n + 1n : Nat))))
 
 # Outputs of watch src: the primary's (0) through its predicates, a related
 # watch's (n) through its relation.
@@ -543,14 +552,14 @@ def Relist.after(os: List<&2, W.Out>, open: Bool) -> Bool:
 
 def Relist.mark(st: CState, +src: U32, open: Bool) -> CState:
   match st open:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}} True{}:
-      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, Q.Mp.on(rl, U32.show(src))}}
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}} False{}:
-      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, Q.Mp.off(rl, U32.show(src))}}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}, mq} True{}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, Q.Mp.on(rl, U32.show(src))}, mq}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}, mq} False{}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, Q.Mp.off(rl, U32.show(src))}, mq}
 
 def Relist.open(st: CState, +src: U32) -> Bool:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, +rl}, mq}:
       Q.Mp.has(rl, U32.show(src))
 
 # Whether any watch is midway through a relist: its cache still holds the
@@ -558,17 +567,17 @@ def Relist.open(st: CState, +src: U32) -> Bool:
 # looked up in the old cache and dropped).
 def Relist.any(st: CState) -> Bool:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}, mq}:
       Bool.not(List.is_empty(&2, String, Map.keys(&2, U32, rl)))
 
 def Ctl.on_outs.fold(st: CState, +src: U32, +outs: List<&2, W.Out>, +spec: X.Spec, own: Bool) -> CState:
   match st own:
-    case CState{s, cs, q, x, p, tm} True{}:
-      Ctl.prim.put(cs, q, Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs))), p, tm,
+    case CState{s, cs, q, x, p, tm, mq} True{}:
+      Ctl.prim.put(cs, q, Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs))), p, tm, mq,
         X.Fold.prim(X.Spec.preds(spec), outs, X.Fold{s, Nil{}, Nil{}}))
-    case CState{+s, +cs, q, x, p, tm} False{}:
+    case CState{+s, +cs, q, x, p, tm, mq} False{}:
       Ctl.rel.put(U32.to_nat((src - 1 : U32)), s, cs, q,
-        Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs))), p, tm,
+        Stats.events(x, U32.from_nat(List.length(&2, W.Out, outs))), p, tm, mq,
         X.Fold.rel_where(Secs.rel(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))),
           Secs.preds(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))), X.Spec.res(spec),
           X.Out.trim_all(Secs.drop(X.Spec.secs(spec), U32.to_nat((src - 1 : U32))), outs), s,
@@ -579,10 +588,10 @@ def Ctl.on_outs(+st: CState, +src: U32, +outs: List<&2, W.Out>, +spec: X.Spec, o
   Relist.mark(Ctl.on_outs.fold(st, src, outs, spec, own), src, Relist.after(outs, Relist.open(st, src)))
 
 def Ctl.on_done(s: S.Store, cs: List<&2, S.Store>, x: Stats, p: Maybe<&2, Chan(Unit)>, tm: Tim,
-  r: Q.Queue & List<&2, Q.Timer>) -> CState & List<&2, Q.Timer>:
+  mq: List<&2, X.Mapped>, r: Q.Queue & List<&2, Q.Timer>) -> CState & List<&2, Q.Timer>:
   match r:
     case (q, ts):
-      (CState{s, cs, q, x, p, tm}, ts)
+      (CState{s, cs, q, x, p, tm, mq}, ts)
 
 # A finished key whose object is gone (deleted while it ran or waited) is
 # forgotten, so the queue keeps nothing for it.
@@ -604,21 +613,21 @@ def Ctl.cached(m: Maybe<&2, J.Json>) -> Bool:
 def Ctl.on_done.st(st: CState, +key: String, +a: Q.Action, +ms: U32) ->
   CState & List<&2, Q.Timer>:
   match st:
-    case CState{+s, cs, q, x, p, tm}:
-      Ctl.on_done(s, cs, Stats.done(x, a, ms), p, tm,
+    case CState{+s, cs, q, x, p, tm, mq}:
+      Ctl.on_done(s, cs, Stats.done(x, a, ms), p, tm, mq,
         Ctl.forget_gone(Q.Queue.done(q, key, a), key, Bool.not(Ctl.cached(S.Store.get(s, key)))))
 
 def Ctl.on_wake.go(st: CState, +key: String, mine: Bool) -> CState & List<&2, Q.Timer>:
   match st mine:
-    case CState{s, cs, q, x, p, Tim{+at, +gen, n, sn, rd, dt, tk, rl}} True{}:
+    case CState{s, cs, q, x, p, Tim{+at, +gen, n, sn, rd, dt, tk, rl}, mq} True{}:
       (CState{s, cs, Q.Queue.wake(q, key, Q.Mp.get(gen, key)), x, p,
-        Tim{Q.Mp.off(at, key), Q.Mp.off(gen, key), n, sn, rd, dt, tk, rl}}, Nil{})
+        Tim{Q.Mp.off(at, key), Q.Mp.off(gen, key), n, sn, rd, dt, tk, rl}, mq}, Nil{})
     case y False{}:
       (y, Nil{})
 
 def Tim.at(st: CState) -> Map<&2, U32>:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}, mq}:
       at
 
 # A sleeper woke: if it is still the one for its key's pending wake (the
@@ -629,8 +638,8 @@ def Ctl.on_wake(+st: CState, +key: String, +due: U32) -> CState & List<&2, Q.Tim
 
 def Ctl.on_stop(st: CState, r: Chan(Unit)) -> CState & List<&2, Q.Timer>:
   match st:
-    case CState{s, cs, q, x, p, tm}:
-      (CState{s, cs, q, x, Some{r}, tm}, Nil{})
+    case CState{s, cs, q, x, p, tm, mq}:
+      (CState{s, cs, q, x, Some{r}, tm, mq}, Nil{})
 
 # A dispatch pass: the queue, the jobs to start, and whether a popped key
 # was gone from the store (its slot freed, so another pass may start more).
@@ -639,8 +648,8 @@ type Disp is Data:
 
 def Ctl.ticked(st: CState) -> CState:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
-      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, False{}, rl}}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}, mq}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, False{}, rl}, mq}
 
 # Scheduling
 # ----------
@@ -704,22 +713,22 @@ def Tim.arm_all.go(ts: List<&2, Q.Timer>, r: Tim & List<&2, Sleep>) -> Tim & Lis
       Tim.arm_all.go(rest, Tim.arm.pair(r, t))
 
 def Ctl.plan.put(s: S.Store, cs: List<&2, S.Store>, q: Q.Queue, x: Stats, p: Maybe<&2, Chan(Unit)>,
-  r: Tim & List<&2, Sleep>) -> CState & List<&2, Sleep>:
+  mq: List<&2, X.Mapped>, r: Tim & List<&2, Sleep>) -> CState & List<&2, Sleep>:
   match r:
     case (tm, ss):
-      (CState{s, cs, q, x, p, tm}, ss)
+      (CState{s, cs, q, x, p, tm, mq}, ss)
 
 # The queue's timers become the keys' wakes, and the sleepers to start.
 def Ctl.plan(r: CState & List<&2, Q.Timer>) -> CState & List<&2, Sleep>:
   match r:
-    case (CState{s, cs, q, x, p, tm}, ts):
-      Ctl.plan.put(s, cs, q, x, p, Tim.arm_all.go(ts, (tm, Nil{})))
+    case (CState{s, cs, q, x, p, tm, mq}, ts):
+      Ctl.plan.put(s, cs, q, x, p, mq, Tim.arm_all.go(ts, (tm, Nil{})))
 
 # The state at a message's arrival: the clock reads now.
 def Ctl.at(st: CState, +now: U32) -> CState:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
-      CState{s, cs, q, x, p, Tim{at, gen, now, sn, rd, True{}, tk, rl}}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}, mq}:
+      CState{s, cs, q, x, p, Tim{at, gen, now, sn, rd, True{}, tk, rl}, mq}
 
 def Ctl.dispatch.forget(r: Q.Queue & List<&2, Q.Timer>, +key: String) -> Q.Queue:
   match r:
@@ -759,19 +768,19 @@ def Ctl.dispatch.loop(fuel: Nat, +s: S.Store, d: Disp) -> Disp:
       x
 
 def Ctl.dispatch.wrap(s: S.Store, cs: List<&2, S.Store>, x: Stats, p: Maybe<&2, Chan(Unit)>,
-  tm: Tim, d: Disp) -> CState & List<&2, Job>:
+  tm: Tim, mq: List<&2, X.Mapped>, d: Disp) -> CState & List<&2, Job>:
   match d:
     case Disp{q, jobs, dr}:
-      (CState{s, cs, q, x, p, tm}, jobs)
+      (CState{s, cs, q, x, p, tm, mq}, jobs)
 
 def Ctl.dispatch.ready(+s: S.Store, cs: List<&2, S.Store>, +q: Q.Queue, x: Stats,
-  p: Maybe<&2, Chan(Unit)>, tm: Tim, ready: Bool) -> CState & List<&2, Job>:
+  p: Maybe<&2, Chan(Unit)>, tm: Tim, mq: List<&2, X.Mapped>, ready: Bool) -> CState & List<&2, Job>:
   match ready:
     case True{}:
-      Ctl.dispatch.wrap(s, cs, x, p, tm,
+      Ctl.dispatch.wrap(s, cs, x, p, tm, mq,
         Ctl.dispatch.loop(1n+U32.to_nat(Q.Queue.depth(q)), s, Disp{q, Nil{}, True{}}))
     case False{}:
-      (CState{s, cs, q, x, p, tm}, Nil{})
+      (CState{s, cs, q, x, p, tm, mq}, Nil{})
 
 def Ctl.stopping(p: Maybe<&2, Chan(Unit)>) -> Bool:
   match p:
@@ -784,10 +793,10 @@ def Ctl.stopping(p: Maybe<&2, Chan(Unit)>) -> Bool:
 # none while a watch is midway through a relist, and none once stopping.
 def Ctl.dispatch(st: CState) -> CState & List<&2, Job>:
   match st:
-    case CState{+s, +cs, +q, +x, +p, +tm}:
-      Ctl.dispatch.ready(s, cs, q, x, p, tm,
+    case CState{+s, +cs, +q, +x, +p, +tm, +mq}:
+      Ctl.dispatch.ready(s, cs, q, x, p, tm, mq,
         Bool.and(Bool.and(Bool.and(S.Store.ready(s), Caches.ready(cs)), Bool.not(Ctl.stopping(p))),
-          Bool.not(Relist.any(CState{s, cs, q, x, p, tm}))))
+          Bool.not(Relist.any(CState{s, cs, q, x, p, tm, mq}))))
 
 def Ctl.halt.go(p: Maybe<&2, Chan(Unit)>, idle: Bool) -> Maybe<&2, Chan(Unit)>:
   match idle:
@@ -799,28 +808,28 @@ def Ctl.halt.go(p: Maybe<&2, Chan(Unit)>, idle: Bool) -> Maybe<&2, Chan(Unit)>:
 # Whose stop request to answer: a stopping controller with nothing running.
 def Ctl.halt(st: CState) -> Maybe<&2, Chan(Unit)>:
   match st:
-    case CState{s, cs, +q, x, p, tm}:
+    case CState{s, cs, +q, x, p, tm, mq}:
       Ctl.halt.go(p, U32.is_eq(Q.Queue.nrun(q), 0))
 
 def Ctl.ready(st: CState) -> Bool:
   match st:
-    case CState{+s, +cs, q, x, p, tm}:
+    case CState{+s, +cs, q, x, p, tm, mq}:
       Bool.and(S.Store.ready(s), Caches.ready(cs))
 
 def Ctl.snap_due(st: CState) -> Bool:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, +n, +sn, +rd, dt, tk, rl}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, +n, +sn, +rd, dt, tk, rl}, mq}:
       Bool.or(Bool.or(U32.is_ge((n - sn : U32), 1000), U32.is_eq(sn, 0)),
-        Bool.xor(rd, Ctl.ready(CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}})))
+        Bool.xor(rd, Ctl.ready(CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}, mq})))
 
 def Ctl.ticking(st: CState) -> CState:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
-      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, True{}, rl}}
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}, mq}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, True{}, rl}, mq}
 
 def Ctl.tick_pending(st: CState) -> Bool:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}, mq}:
       tk
 
 # What an idle loop does about its status: publish now (a second has
@@ -842,7 +851,7 @@ def Ctl.idle.go(dirty: Bool, due: Bool, pending: Bool) -> Idle:
 
 def Ctl.dirty(st: CState) -> Bool:
   match st:
-    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}}:
+    case CState{s, cs, q, x, p, Tim{at, gen, n, sn, rd, dt, tk, rl}, mq}:
       dt
 
 def Ctl.idle(+st: CState) -> Idle:
@@ -850,12 +859,12 @@ def Ctl.idle(+st: CState) -> Idle:
 
 def Ctl.snapped(st: CState) -> CState:
   match st:
-    case CState{+s, +cs, q, x, p, Tim{at, gen, +n, sn, rd, dt, tk, rl}}:
-      CState{s, cs, q, x, p, Tim{at, gen, n, U32.max(n, 1), Bool.and(S.Store.ready(s), Caches.ready(cs)), False{}, tk, rl}}
+    case CState{+s, +cs, q, x, p, Tim{at, gen, +n, sn, rd, dt, tk, rl}, mq}:
+      CState{s, cs, q, x, p, Tim{at, gen, n, U32.max(n, 1), Bool.and(S.Store.ready(s), Caches.ready(cs)), False{}, tk, rl}, mq}
 
 def Ctl.snap(st: CState, name: String) -> Snap:
   match st:
-    case CState{+s, +cs, +q, Stats{r, e, v, h, sm}, p, tm}:
+    case CState{+s, +cs, +q, Stats{r, e, v, h, sm}, p, tm, mq}:
       Snap{name, Bool.and(S.Store.ready(s), Caches.ready(cs)), r, e, v, Q.Queue.nrun(q),
         U32.from_nat(S.Store.size(s)), Q.Queue.depth(q), h, sm, Caches.sizes(cs)}
 
@@ -958,7 +967,7 @@ def CCtx.cfg(c: CCtx) -> K.Config:
 # What a reconcile sees: the config, the controller's index and the caches.
 def Ctl.ctx(st: CState, +c: CCtx) -> X.Ctx:
   match st:
-    case CState{s, cs, q, x, p, tm}:
+    case CState{s, cs, q, x, p, tm, mq}:
       X.Ctx{CCtx.cfg(c), CCtx.idx(c), s, cs, 0, Some{CCtx.meter(c)},
         X.Spec.clusters(CCtx.spec(c), CCtx.cfg(c))}
 
@@ -1116,44 +1125,87 @@ def Ctl.spawn(~rec: J.Json -> X.Ctx -> IO(Q.Action), jobs: List<&2, Job>, +chan:
           Ctl.job(~rec, key, o, X.Ctx.with_fails(ctx, fl), kind, chan, dog)),
         u => Ctl.spawn(~rec, t, chan, ctx, kind, dog))
 
+# The controller's mapper (RMap)
+# ------------------------------
+#
+# A related watch whose relation is RMap leaves its objects (as they are
+# now, as they were cached, and those a relist drops) to the controller's
+# mapper, map(n, obj, ctx): the n-th related watch's object, with the
+# caches as they are after the batch. The keys it names are queued like
+# any relation's.
+
+def CState.maps(st: CState) -> List<&2, X.Mapped>:
+  match st:
+    case CState{s, cs, q, x, p, tm, mq}:
+      mq
+
+def Ctl.map_parsed(~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +n: U32, r: Result<&2, &2, String, J.Json>, +c: X.Ctx) ->
+  List<&2, String>:
+  match r:
+    case Done{j}:
+      map(n, j, c)
+    case Fail{e}:
+      Nil{}
+
+def Ctl.map_keys(~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, ms: List<&2, X.Mapped>, +c: X.Ctx) -> List<&2, String>:
+  match ms:
+    case Nil{}:
+      Nil{}
+    case Con{X.Mapped{n, o}, t}:
+      List.append(&2, String, Ctl.map_parsed(~map, n, J.Json.parse(o), c), Ctl.map_keys(~map, t, c))
+
+def Ctl.map_put(st: CState, ks: List<&2, String>) -> CState:
+  match st:
+    case CState{s, cs, q, x, p, tm, mq}:
+      CState{s, cs, Q.Queue.add_all(ks, q), x, p, tm, Nil{}}
+
+def Ctl.map_all(~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +st: CState, +c: CCtx) -> CState:
+  Ctl.map_put(st, Ctl.map_keys(~map, CState.maps(st), Ctl.ctx(st, c)))
+
+def Ctl.mapped(~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, r: CState & List<&2, Q.Timer>, +c: CCtx) -> CState & List<&2, Q.Timer>:
+  match r:
+    case (+st, ts):
+      (Ctl.map_all(~map, st, c), ts)
+
 # The controller loop: a message in, the state stepped, timers armed,
 # reconciles started, the next message awaited; a stop request is answered
 # once nothing runs, and ends the loop.
-def Ctl.run(~rec: J.Json -> X.Ctx -> IO(Q.Action), outer: Nat, fuel: Nat, ev: CEv, +st: CState,
+def Ctl.run(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, outer: Nat, fuel: Nat, ev: CEv, +st: CState,
   +ctx: CCtx) -> IO(Unit):
   match outer fuel ev:
     case 0n 0n e:
       Loop.spent("Ctl.run")
     case 1n+o 0n e:
-      Ctl.run(~rec, o, 4294967295n, e, st, ctx)
+      Ctl.run(~rec, ~map, o, 4294967295n, e, st, ctx)
     case o 1n+f CMsg{None{}}:
       IO.pure(Unit, Unit{})
     case o 1n+f CMsg{Some{m}}:
       IO.bind(U32, Unit, Ctl.mono(),
-        now => Ctl.run(~rec, o, f, CTimed{m, now}, st, ctx))
+        now => Ctl.run(~rec, ~map, o, f, CTimed{m, now}, st, ctx))
     case o 1n+f CTimed{m, +now}:
-      Ctl.run(~rec, o, f, CHandled{Ctl.plan(Ctl.on_msg(Ctl.at(st, now), m, CCtx.spec(ctx)))}, st, ctx)
+      Ctl.run(~rec, ~map, o, f, CHandled{Ctl.plan(Ctl.mapped(~map, Ctl.on_msg(Ctl.at(st, now), m, CCtx.spec(ctx)), ctx))},
+        st, ctx)
     case o 1n+f CHandled{(+st1, ss)}:
       IO.bind(Unit, Unit, Ctl.sleeps(ss, CCtx.chan(ctx)),
-        u => Ctl.run(~rec, o, f, CDisp{Ctl.dispatch(st1)}, st1, ctx))
+        u => Ctl.run(~rec, ~map, o, f, CDisp{Ctl.dispatch(st1)}, st1, ctx))
     case o 1n+f CDisp{(+st2, jobs)}:
       IO.bind(Unit, Unit, Ctl.spawn(~rec, jobs, CCtx.chan(ctx), Ctl.ctx(st2, ctx), CCtx.kind(ctx),
         CCtx.dog(ctx)),
         u => IO.bind(CState, Unit, Ctl.publish(st2, ctx, Ctl.snap_due(st2)),
-          +st3 => Ctl.run(~rec, o, f, CNext{Ctl.halt(st3)}, st3, ctx)))
+          +st3 => Ctl.run(~rec, ~map, o, f, CNext{Ctl.halt(st3)}, st3, ctx)))
     case o 1n+f CNext{Some{r}}:
       IO.bind(Result<&1, &1, Unit, Unit>, Unit, Chan.send(Unit, r, Unit{}),
         u => L.Log.info("controller stopped", [L.Log.kv("controller", Ctl.name(ctx))]))
     case o 1n+f CNext{None{}}:
       IO.bind(Poll<&1, &1, Maybe<&1, Msg>, Unit>, Unit, Chan.try_recv(Msg, CCtx.chan(ctx), 0),
-        p => Ctl.run(~rec, o, f, CPeek{p}, st, ctx))
+        p => Ctl.run(~rec, ~map, o, f, CPeek{p}, st, ctx))
     case o 1n+f CPeek{Ready{m}}:
-      Ctl.run(~rec, o, f, CMsg{m}, st, ctx)
+      Ctl.run(~rec, ~map, o, f, CMsg{m}, st, ctx)
     case o 1n+f CPeek{Wait{u}}:
       # idle: publish what changed since the last snapshot, then wait
       IO.bind(CState, Unit, Ctl.at_idle(st, ctx, Ctl.idle(st)),
         +st4 => IO.bind(Maybe<&1, Msg>, Unit, Chan.recv(Msg, CCtx.chan(ctx)),
-          m => Ctl.run(~rec, o, f, CMsg{m}, st4, ctx)))
+          m => Ctl.run(~rec, ~map, o, f, CMsg{m}, st4, ctx)))
 
 def Ctl.watch.subs(+cfg: K.Config, api: C.Api, label: String, field: String, subs: List<&2, Sub>) ->
   IO(Unit):
@@ -1206,21 +1258,21 @@ def Keeper.start() -> IO(Chan(SMsg)):
       IO.bind(Maybe<&1, SMsg>, Unit, Chan.recv(SMsg, c),
         x => Keeper.run(4294967295n, 4294967295n, x, Map.new(&2, Snap), c))), u => IO.pure(Chan(SMsg), c)))
 
-def Ctl.loop.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +spec: X.Spec,
+def Ctl.loop.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +cfg: K.Config, +spec: X.Spec,
   +chan: Chan(Msg), +status: Chan(SMsg), +meter: Chan(X.Meter), +idx: U32, dog: Maybe<&2, Chan(Dog)>) ->
   IO(Unit):
-  Ctl.run(~rec, 4294967295n, 4294967295n,
+  Ctl.run(~rec, ~map, 4294967295n, 4294967295n,
     CDisp{(CState{S.Store.new(),
       List.replicate(S.Store, List.length(&2, X.Sec, X.Spec.secs(spec)), S.Store.new()),
-      Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}}, None{}, Tim.new()}, Nil{})},
+      Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}}, None{}, Tim.new(), Nil{}}, Nil{})},
     CState{S.Store.new(), Nil{}, Q.Queue.new(X.Spec.max_of(spec)), Stats{0, 0, 0, Hist.zero(), Sum{0, 0}},
-      None{}, Tim.new()},
+      None{}, Tim.new(), Nil{}},
     CCtx{cfg, spec, chan, status, idx, meter, dog})
 
-def Ctl.loop(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +spec: X.Spec,
+def Ctl.loop(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +cfg: K.Config, +spec: X.Spec,
   +chan: Chan(Msg), +status: Chan(SMsg), +meter: Chan(X.Meter), +idx: U32) -> IO(Unit):
   IO.bind(Maybe<&2, Chan(Dog)>, Unit, Dog.start(X.Spec.timeout_of(spec), X.Spec.kind(spec)),
-    dog => Ctl.loop.go(~rec, cfg, spec, chan, status, meter, idx, dog))
+    dog => Ctl.loop.go(~rec, ~map, cfg, spec, chan, status, meter, idx, dog))
 
 def Controller.inbox() -> IO(Chan(Msg)):
   Chan.new(Msg, 4096)
@@ -1411,25 +1463,25 @@ def Manager.watch(+cfg: K.Config, ws: List<&2, Watch>) -> IO(Unit):
     case Con{Watch{a, l, fs, c, ss}, t}:
       IO.bind(Unit, Unit, Ctl.watch.subs(X.Cluster.of(cfg, c), a, l, fs, ss), u => Manager.watch(cfg, t))
 
-def Manager.loops(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, cs: List<&2, X.Spec>,
+def Manager.loops(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +cfg: K.Config, cs: List<&2, X.Spec>,
   chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +i: U32) -> IO(Unit):
   match cs chs:
     case Con{s, t} Con{ch, ct}:
-      IO.bind(Unit, Unit, IO.spawn(Unit, Ctl.loop(~rec, cfg, s, ch, status, meter, i)),
-        u => Manager.loops(~rec, cfg, t, ct, status, meter, (i + 1 : U32)))
+      IO.bind(Unit, Unit, IO.spawn(Unit, Ctl.loop(~rec, ~map, cfg, s, ch, status, meter, i)),
+        u => Manager.loops(~rec, ~map, cfg, t, ct, status, meter, (i + 1 : U32)))
     case _ _:
       IO.pure(Unit, Unit{})
 
 # Runs every controller on its inbox (Manager.inboxes), sharing their
 # watches. rec(obj, ctx) reconciles obj; X.Ctx.idx(ctx) names the
 # controller.
-def Manager.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
+def Manager.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +cfg: K.Config, +cs: List<&2, X.Spec>,
   +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter),
   p: Poll<&1, &1, Maybe<&1, Unit>, Unit>) -> IO(Unit):
   match p:
     case Ready{Some{u}}:
       IO.bind(Unit, Unit, Manager.watch(cfg, Plan.build(cs, chs, Nil{})),
-        u2 => Manager.loops(~rec, cfg, cs, chs, status, meter, 0))
+        u2 => Manager.loops(~rec, ~map, cfg, cs, chs, status, meter, 0))
     case _:
       L.Log.info("shutting down; controllers not started", Nil{})
 
@@ -1437,11 +1489,21 @@ def Manager.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs:
 # watches, once it takes the start gate's token (Manager.gate): shutdown
 # takes it first when it comes first, and then nothing starts. rec(obj,
 # ctx) reconciles obj; X.Ctx.idx(ctx) names the controller.
+def Manager.start_mapped(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +cfg: K.Config,
+  +cs: List<&2, X.Spec>, +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter),
+  +gate: Chan(Unit)) -> IO(Unit):
+  IO.bind(Poll<&1, &1, Maybe<&1, Unit>, Unit>, Unit, Chan.try_recv(Unit, gate, 0),
+    p => Manager.start.go(~rec, ~map, cfg, cs, chs, status, meter, p))
+
+# No mapper: an RMap relation then names no primary.
+def Manager.no_map(n: U32, o: J.Json, c: X.Ctx) -> List<&2, String>:
+  Nil{}
+
+# Manager.start_mapped with no mapper (RMap relations name nothing).
 def Manager.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +cs: List<&2, X.Spec>,
   +chs: List<&2, Chan(Msg)>, +status: Chan(SMsg), +meter: Chan(X.Meter), +gate: Chan(Unit)) ->
   IO(Unit):
-  IO.bind(Poll<&1, &1, Maybe<&1, Unit>, Unit>, Unit, Chan.try_recv(Unit, gate, 0),
-    p => Manager.start.go(~rec, cfg, cs, chs, status, meter, p))
+  Manager.start_mapped(~rec, ~Manager.no_map, cfg, cs, chs, status, meter, gate)
 
 # The start gate: one token, taken by whichever comes first, the
 # controllers starting (Manager.start) or shutdown (Manager.stop). So

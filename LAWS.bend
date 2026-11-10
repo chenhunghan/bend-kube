@@ -671,3 +671,17 @@ law annotated_needs_name:
       J.KV{"namespace", J.JStr{"vc-host"}},
       J.KV{"annotations", J.Json.obj([J.KV{"src/ns", J.JStr{"default"}}])}])}]), prim)
     == Nil{} : List<&2, String>}
+
+# A related object under RMap is left, whole, to the controller's mapper.
+law map_defers_to_mapper:
+  for res: C.Res
+  for o: J.Json
+  for prim: S.Store
+  {X.Rel.keys(X.RMap{}, res, o, prim) == [X.Mapped.mark() ++ J.Json.show(o)] : List<&2, String>}
+
+# A fold's keys split into plain keys and the objects for the mapper, each
+# with the related watch it came from.
+law map_split_keeps_keys:
+  {X.Mapped.split([X.Mapped.mark() ++ "{}", "ns/a"], 2)
+    == X.Split{["ns/a"], [X.Mapped{2, "{}"}]} : X.Split}
+

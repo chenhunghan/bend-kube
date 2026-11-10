@@ -27,7 +27,9 @@ import ./store.bend as S
 #   reconciles every primary in the object's namespace; RAnnotated reads
 #   the primary's namespace and name from two annotations, as a syncer
 #   records where a copy in another namespace or cluster came from
-#   (vcluster's object-namespace and object-name). Both the object as
+#   (vcluster's object-namespace and object-name); RMap hands the object
+#   to the controller's own mapper (Kube.control_mapped), which names the
+#   primaries. Both the object as
 #   it was cached and as it is now are mapped, so a relation that moves
 #   reconciles the old primary as well as the new one.
 # - Clusters: a watch runs against the controllers' config, or another
@@ -114,6 +116,7 @@ type Rel is Data:
   RRef{path: List<&2, String>}
   RAll{}
   RAnnotated{ns_key: String, name_key: String}
+  RMap{}
 
 # A field names the object: the string itself, or a list holding it.
 def Ref.names.any(xs: List<&2, J.Json>, +name: String) -> Bool:
@@ -201,6 +204,12 @@ def Rel.annotated.go(+res: C.Res, ns: Maybe<&2, String>, name: Maybe<&2, String>
 def Rel.annotated(+o: J.Json, +nk: String, +vk: String, +res: C.Res) -> List<&2, String>:
   Rel.annotated.go(res, Rel.annot(o, nk), Rel.annot(o, vk), C.Obj.namespace(o))
 
+# An object for the controller's mapper (RMap) rides among a fold's keys
+# behind this mark, which no key starts with; the runtime takes it out
+# (Mapped.split) and maps it.
+def Mapped.mark() -> String:
+  "\0map:"
+
 # The group of an apiVersion: "apps" of "apps/v1", "" of "v1".
 def Ref.group.go(ps: List<&2, String>) -> String:
   match ps:
@@ -251,6 +260,8 @@ def Rel.keys(r: Rel, +res: C.Res, +o: J.Json, +prim: S.Store) -> List<&2, String
       Rel.all(S.Store.values(prim), C.Obj.namespace(o))
     case RAnnotated{nk, vk}:
       Rel.annotated(o, nk, vk, res)
+    case RMap{}:
+      [Mapped.mark() ++ J.Json.show(o)]
 
 # Folding a watcher's outputs
 # ---------------------------
@@ -650,6 +661,32 @@ def Out.trim_all(+fs: List<&2, String>, os: List<&2, W.Out>) -> List<&2, W.Out>:
       Nil{}
     case Con{o, t}:
       Out.trim(fs, o) <> Out.trim_all(fs, t)
+
+# Objects for the mapper
+# ----------------------
+
+# A related object the controller's mapper (RMap) is to map: the related
+# watch it came from (from 1) and the object, as JSON text.
+type Mapped is Data:
+  Mapped{n: U32, obj: String}
+
+# A fold's keys, split: plain keys, and objects for the mapper.
+type Split is Data:
+  Split{keys: List<&2, String>, objs: List<&2, Mapped>}
+
+def Split.put(+n: U32, +k: String, marked: Bool, r: Split) -> Split:
+  match marked r:
+    case True{} Split{ks, os}:
+      Split{ks, Mapped{n, String.drop(k, String.length(Mapped.mark()))} <> os}
+    case False{} Split{ks, os}:
+      Split{k <> ks, os}
+
+def Mapped.split(ks: List<&2, String>, +n: U32) -> Split:
+  match ks:
+    case Nil{}:
+      Split{Nil{}, Nil{}}
+    case Con{+k, t}:
+      Split.put(n, k, String.starts_with(k, Mapped.mark()), Mapped.split(t, n))
 
 # Metrics a controller defines
 # ----------------------------

@@ -134,6 +134,13 @@ transforms kube-rs and controller-runtime users apply by hand.
     namespace (the object's own when that one is missing) and name. A
     syncer's copy in another namespace or cluster maps back this way, as
     vcluster's `vcluster.loft.sh/object-namespace` and `object-name` do.
+  - `X.RMap{}`: the controller's own mapper names them (kube-runtime's
+    `watches(.., mapper)`). Run it with
+    `Kb.Kube.control_mapped(~rec, ~map, spec, opts)` (or
+    `control_all_mapped`); `map(n, obj, ctx)` is pure and answers the
+    primary keys (`"ns/name"`, or `"name"`) that an object of the n-th
+    related watch triggers, with the caches in `ctx`. It sees each object
+    as it is and as it was cached, so a link that moves wakes both ends.
 
   When a related watch relists, objects that vanished while it was down
   reconcile the primaries they mapped to. `X.Spec.watches_where(s, api,
@@ -497,7 +504,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 73 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 75 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -539,6 +546,8 @@ loop.
   - an owner of the same kind in another group queues nothing;
   - under any predicate, a change of finalizers reconciles.
   - an object recreated under the same name (a new uid) reconciles;
+  - an `RMap` object is left whole to the mapper, with the watch it came
+    from;
   - an object's annotations name the primary of `RAnnotated`, in the
     namespace they name, and without the name annotation none;
   - a related watch without predicates triggers on every change, and a
@@ -729,8 +738,9 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
   - An operator that needs admission or conversion webhooks runs them as a
     separate service. A TLS sidecar alone is not enough: the webhook
     protocol (AdmissionReview, ConversionReview) must be served too.
-- **Watch shaping.** Relations are the five kinds above; there is no
-  arbitrary mapper function.
+- **Mappers.** One mapper serves all of a process's `RMap` watches (`n`
+  and `X.Ctx.idx` tell them apart), because a Bend callback is fixed at
+  compile time and can't be stored in a spec.
 - **Resync.** There is no periodic resync of every object. A reconcile asks
   for its next look with `Requeue{ms}`.
 - **One lease.** Watches can run on other clusters (`X.Spec.watch_on`),

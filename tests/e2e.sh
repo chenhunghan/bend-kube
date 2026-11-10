@@ -186,6 +186,22 @@ wait "$hang_pid" || code=$?
 [ "$code" = 1 ] && grep '"reconcile hung past its timeout' "$work/hang.log" | grep -q bend-e2e/stuck \
   && pass "a reconcile past its timeout exits the process with status 1" || fail "hang: exit $code: $(cat "$work/hang.log")"
 
+echo "== a relation mapped by code"
+(cd tests/fixtures && bend mapped.bend -o "$work/mapped") >/dev/null 2>&1 || fail "build mapped"
+for n in m1 m2 m3; do k create configmap $n --from-literal=a=b >/dev/null; k label configmap $n bend-kube/mapped=true >/dev/null; done
+KUBECONFIG="$work/kc.json" "$work/mapped" > "$work/mapped.log" 2>&1 &
+for _ in $(seq 1 30); do [ "$(grep -c '"reconciled"' "$work/mapped.log")" -ge 3 ] && break; sleep 1; done
+since() { tail -n +"$(( $1 + 1 ))" "$work/mapped.log" | grep '"reconciled"' | grep -o 'bend-e2e/m[0-9]' | sort -u | tr '\n' ' '; }
+n0=$(wc -l < "$work/mapped.log")
+k create secret generic s --from-literal=x=1 >/dev/null; k annotate secret s bend-kube/for=m1,m3 >/dev/null
+for _ in $(seq 1 20); do [ "$(since "$n0")" = "bend-e2e/m1 bend-e2e/m3 " ] && break; sleep 1; done
+[ "$(since "$n0")" = "bend-e2e/m1 bend-e2e/m3 " ] && pass "the mapper names the primaries a related object triggers" || fail "mapped: $(since "$n0")"
+n1=$(wc -l < "$work/mapped.log")
+k annotate --overwrite secret s bend-kube/for=m2 >/dev/null
+for _ in $(seq 1 20); do [ "$(since "$n1")" = "bend-e2e/m1 bend-e2e/m2 bend-e2e/m3 " ] && break; sleep 1; done
+[ "$(since "$n1")" = "bend-e2e/m1 bend-e2e/m2 bend-e2e/m3 " ] && pass "a mapped object that moves wakes its old and new primaries" || fail "mapped move: $(since "$n1")"
+pkill -f "$work/mapped" || true
+
 echo "== rate limit and drain"
 (cd tests/fixtures && bend slow.bend -o "$work/slow") >/dev/null 2>&1 || fail "build slow"
 k create configmap slow --from-literal=a=b >/dev/null; k label configmap slow bend-kube/slow=true >/dev/null

@@ -260,3 +260,9 @@ def Laws.annotated_triggers_named(prim):
 
 def Laws.annotated_needs_name(prim):
   {==}
+
+def Laws.map_defers_to_mapper(res, o, prim):
+  {==}
+
+def Laws.map_split_keeps_keys():
+  {==}

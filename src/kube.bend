@@ -280,7 +280,7 @@ def Kube.timeouts(ss: List<&2, X.Spec>, +ms: U32) -> List<&2, X.Spec>:
     case Con{s, t}:
       X.Spec.timeout_or(s, ms) <> Kube.timeouts(t, ms)
 
-def Kube.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +ecfg: K.Config,
+def Kube.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +cfg: K.Config, +ecfg: K.Config,
   +specs: List<&2, X.Spec>, +p: U32, l: Maybe<&2, E.LOpts>, +grace: U32) -> IO(Unit):
   IO.bind(List<&2, Chan(R.Msg)>, Unit, R.Manager.inboxes(List.length(&2, X.Spec, specs)),
     +chs => IO.bind(Chan(R.SMsg), Unit, R.Keeper.start(),
@@ -290,18 +290,18 @@ def Kube.start.go(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +ecfg: 
             [L.Log.kv("count", Nat.show(List.length(&2, X.Spec, specs))),
               L.Log.kv("server", K.Config.host(cfg))]),
             u2 => Kube.elect(ecfg, l, R.Manager.stop(chs, gate, grace),
-              R.Manager.start(~rec, cfg, specs, chs, status, meter, gate))))))))
+              R.Manager.start_mapped(~rec, ~map, cfg, specs, chs, status, meter, gate))))))))
 
 # cfg serves the controllers (rate-limited); ecfg serves leader election,
 # outside the rate limit, so a burst of reconciles never delays a renewal.
 # Every spec without its own reconcile timeout takes Opts.timeout, and
 # every watch on another cluster gets its own connection pool.
-def Kube.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, +ecfg: K.Config,
+def Kube.start(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +cfg: K.Config, +ecfg: K.Config,
   specs: List<&2, X.Spec>, o: Opts) -> IO(Unit):
   match o:
     case Opts{m, +p, l, sel, +grace, q, b, +to}:
       IO.bind(List<&2, X.Spec>, Unit, Kube.pool_specs(Kube.timeouts(specs, to)),
-        +ss => Kube.start.go(~rec, cfg, ecfg, ss, p, l, grace))
+        +ss => Kube.start.go(~rec, ~map, cfg, ecfg, ss, p, l, grace))
 
 # Up to 8 idle keep-alive connections shared by every request.
 def Kube.pool() -> IO(Chan(Socket)):
@@ -350,34 +350,55 @@ def Kube.fence(on: Bool) -> IO(Maybe<&2, Chan(K.FenceMsg)>):
     case False{}:
       IO.pure(Maybe<&2, Chan(K.FenceMsg)>, None{})
 
-def Kube.pooled(~rec: J.Json -> X.Ctx -> IO(Q.Action), +cfg: K.Config, specs: List<&2, X.Spec>,
+def Kube.pooled(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, +cfg: K.Config, specs: List<&2, X.Spec>,
   +o: Opts) -> IO(Unit):
   IO.bind(Maybe<&2, Chan(K.FenceMsg)>, Unit, Kube.fence(Opts.elects(o)),
     +fc => IO.bind(K.Config, Unit, Kube.rate(o, cfg),
-      cfg2 => Kube.start(~rec, Kube.fenced(cfg2, fc), Kube.fenced(cfg, fc), specs, o)))
+      cfg2 => Kube.start(~rec, ~map, Kube.fenced(cfg2, fc), Kube.fenced(cfg, fc), specs, o)))
+
+# Kube.control_with, with the controllers' mapper for RMap relations:
+# map(n, obj, ctx) names the primaries an object of the n-th related watch
+# triggers (kube-runtime's watches(.., mapper)). It is pure and runs in the
+# controller loop, after each batch, against the caches in ctx.
+def Kube.control_with_mapped(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, cfg: K.Config,
+  specs: List<&2, X.Spec>, +o: Opts) -> IO(Unit):
+  IO.bind(Chan(Socket), Unit, Kube.pool(),
+    p => Kube.pooled(~rec, ~map, K.Config.with_pool(cfg, p), specs, o))
 
 # Runs controllers against a given config (another cluster, a test
 # server); Kube.control_all infers it. The config gets a connection pool
 # and the rate limit.
 def Kube.control_with(~rec: J.Json -> X.Ctx -> IO(Q.Action), cfg: K.Config, specs: List<&2, X.Spec>,
   +o: Opts) -> IO(Unit):
-  IO.bind(Chan(Socket), Unit, Kube.pool(),
-    p => Kube.pooled(~rec, K.Config.with_pool(cfg, p), specs, o))
+  Kube.control_with_mapped(~rec, ~R.Manager.no_map, cfg, specs, o)
 
-def Kube.configured(~rec: J.Json -> X.Ctx -> IO(Q.Action), c: Result<&2, &2, String, K.Config>,
+def Kube.configured(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, c: Result<&2, &2, String, K.Config>,
   specs: List<&2, X.Spec>, +o: Opts) -> IO(Unit):
   match c:
     case Done{cfg}:
-      Kube.control_with(~rec, cfg, specs, o)
+      Kube.control_with_mapped(~rec, ~map, cfg, specs, o)
     case Fail{e}:
       IO.die(Unit, 1, "bend-kube: no config: " ++ e)
+
+# Kube.control_all with the controllers' mapper (Kube.control_with_mapped).
+def Kube.control_all_mapped(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, specs: List<&2, X.Spec>,
+  o: Opts) -> IO(Unit):
+  IO.bind(Result<&2, &2, String, K.Config>, Unit, Cl.Config.infer(),
+    c => Kube.configured(~rec, ~map, c, specs, o))
 
 # Runs several controllers, sharing their watches (Manager): rec(obj, ctx)
 # reconciles obj for controller X.Ctx.idx(ctx), its place in specs.
 def Kube.control_all(~rec: J.Json -> X.Ctx -> IO(Q.Action), specs: List<&2, X.Spec>, o: Opts) ->
   IO(Unit):
-  IO.bind(Result<&2, &2, String, K.Config>, Unit, Cl.Config.infer(),
-    c => Kube.configured(~rec, c, specs, o))
+  Kube.control_all_mapped(~rec, ~R.Manager.no_map, specs, o)
+
+# One controller whose related watches may map objects by code
+# (X.Spec.watches(s, api, X.RMap{})): map(n, obj, ctx) answers the primary
+# keys ("ns/name", or "name") that obj, of the n-th related watch,
+# triggers.
+def Kube.control_mapped(~rec: J.Json -> X.Ctx -> IO(Q.Action), ~map: U32 -> J.Json -> X.Ctx -> List<&2, String>, spec: X.Spec, o: Opts) ->
+  IO(Unit):
+  Kube.control_all_mapped(~rec, ~map, [spec], o)
 
 # Runs one controller (kube-runtime's Controller::new(..).run(..)).
 def Kube.control(~rec: J.Json -> X.Ctx -> IO(Q.Action), spec: X.Spec, o: Opts) -> IO(Unit):

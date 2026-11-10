@@ -25,7 +25,7 @@ def spec(+max: U32) -> X.Spec:
 
 def state(+max: U32) -> R.CState:
   R.CState{S.Store.new(), Nil{}, Q.Queue.new(max), R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}},
-    None{}, R.Tim.new()}
+    None{}, R.Tim.new(), Nil{}}
 
 def st(r: R.CState & List<&2, Q.Timer>) -> R.CState:
   match r:
@@ -87,12 +87,12 @@ def end(r: H.Resp) -> String:
 
 def store_of(s: R.CState) -> S.Store:
   match s:
-    case R.CState{st, cs, q, x, p, t}:
+    case R.CState{st, cs, q, x, p, t, mq}:
       st
 
 def with_queue(+s: S.Store) -> R.CState:
   R.CState{s, Nil{}, Q.Queue.add_all(["ns/gone1", "ns/gone2", "ns/live"], Q.Queue.new(1)),
-    R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}}, None{}, R.Tim.new()}
+    R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}}, None{}, R.Tim.new(), Nil{}}
 
 def action(a: Q.Action) -> String:
   match a:
@@ -133,7 +133,7 @@ def failed_h(+code: U32, body: String, +secs: U32) -> String:
 
 def waits(st: R.CState, +key: String) -> Bool:
   match st:
-    case R.CState{s, cs, q, x, p, t}:
+    case R.CState{s, cs, q, x, p, t, mq}:
       Q.Queue.waiting(q, key)
 
 def kcfg(+host: String) -> K.Config:
@@ -189,6 +189,69 @@ def late(m: Maybe<&2, String>) -> String:
 def running() -> Map<&2, U32>:
   Map.set(&2, U32, Map.set(&2, U32, Map.new(&2, U32), "ns/a", 1000), "ns/b", 4000)
 
+# A mapper: a ConfigMap of the first related watch names the primary in
+# its data.for; any other watch's object names nothing.
+def mapper.pick(one: Bool, +k: String) -> List<&2, String>:
+  match one:
+    case True{}:
+      [k]
+    case False{}:
+      Nil{}
+
+def mapper.go(+n: U32, +f: String, +idx: U32) -> List<&2, String>:
+  mapper.pick(U32.is_eq(n, 1), "ns/" ++ f ++ "@" ++ U32.show(idx))
+
+def mapper(n: U32, o: J.Json, c: X.Ctx) -> List<&2, String>:
+  mapper.go(n, J.Json.str_or(J.Json.at(o, ["data", "for"]), ""), X.Ctx.idx(c))
+
+def mspec() -> X.Spec:
+  X.Spec.watches(X.Spec.of(C.Api{C.Res.config_maps(), C.InNs{"ns"}}), C.Api{C.Res.config_maps(), C.InNs{"ns"}}, X.RMap{})
+
+def ref_cm(+name: String, +f: String) -> J.Json:
+  J.Json.obj([J.KV{"metadata", J.Json.obj([J.KV{"name", J.JStr{name}}, J.KV{"namespace", J.JStr{"ns"}},
+    J.KV{"resourceVersion", J.JStr{"1"}}])}, J.KV{"data", J.Json.obj([J.KV{"for", J.JStr{f}}])}])
+
+def show_bool(b: Bool) -> String:
+  match b:
+    case True{}:
+      "queued"
+    case False{}:
+      "not queued"
+
+def map_line.of(r: R.CState & List<&2, Q.Timer>) -> String:
+  match r:
+    case (R.CState{s, cs, +q, x, p, t, mq}, ts):
+      "a: " ++ show_bool(Q.Queue.waiting(q, "ns/a@0")) ++ ", b: " ++ show_bool(Q.Queue.waiting(q, "ns/b@0"))
+        ++ ", pending left: " ++ Nat.show(List.length(&2, X.Mapped, mq))
+
+# A related object moved from primary a to b: both reconcile, through the
+# mapper, after the batch; the pending objects are then gone.
+def map_line(+c: R.CCtx) -> String:
+  map_line.of(R.Ctl.mapped(~mapper, R.Ctl.on_msg(R.Ctl.at(
+    st(R.Ctl.mapped(~mapper, R.Ctl.on_msg(R.Ctl.at(R.CState{S.Store.new(), [S.Store.new()], Q.Queue.new(8),
+      R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}}, None{}, R.Tim.new(), Nil{}}, 10),
+      R.MOuts{1, [W.OApply{ref_cm("r", "a")}]}, mspec()), c)), 20),
+    R.MOuts{1, [W.OApply{ref_cm("r", "b")}]}, mspec()), c))
+
+def pending(r: R.CState & List<&2, Q.Timer>) -> String:
+  match r:
+    case (R.CState{s, cs, q, x, p, t, mq}, ts):
+      Nat.show(List.length(&2, X.Mapped, mq))
+
+# The second batch hands the mapper the object as it is and as it was cached.
+def map_pending(+c: R.CCtx) -> String:
+  "first batch " ++ pending(R.Ctl.on_msg(R.Ctl.at(R.CState{S.Store.new(), [S.Store.new()], Q.Queue.new(8),
+      R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}}, None{}, R.Tim.new(), Nil{}}, 10),
+      R.MOuts{1, [W.OApply{ref_cm("r", "a")}]}, mspec()))
+    ++ ", second " ++ pending(R.Ctl.on_msg(R.Ctl.at(
+    st(R.Ctl.mapped(~mapper, R.Ctl.on_msg(R.Ctl.at(R.CState{S.Store.new(), [S.Store.new()], Q.Queue.new(8),
+      R.Stats{0, 0, 0, R.Hist.zero(), R.Sum{0, 0}}, None{}, R.Tim.new(), Nil{}}, 10),
+      R.MOuts{1, [W.OApply{ref_cm("r", "a")}]}, mspec()), c)), 20),
+    R.MOuts{1, [W.OApply{ref_cm("r", "b")}]}, mspec()))
+
+def map_report(+c: R.CCtx) -> String:
+  "mapped relation: " ++ map_line(c) ++ "; objects for the mapper: " ++ map_pending(c)
+
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
   # (their objects deleted), the third is live: dispatch must reach it.
@@ -243,3 +306,7 @@ def main() -> IO(Unit):
       ++ late(R.Dog.late(running(), 3001, 2000)) ++ "; nothing running " ++ late(R.Dog.late(Map.new(&2, U32), 99999, 2000))
       ++ "; across the clock's wrap " ++ late(R.Dog.late(Map.set(&2, U32, Map.new(&2, U32), "ns/w", 4294967000), 500, 2000))
       ++ " then " ++ late(R.Dog.late(Map.set(&2, U32, Map.new(&2, U32), "ns/w", 4294967000), 2000, 2000)))
+    mch : Chan(R.Msg) <- Chan.new(R.Msg, 1)
+    sch : Chan(R.SMsg) <- Chan.new(R.SMsg, 1)
+    mtr : Chan(X.Meter) <- Chan.new(X.Meter, 1)
+    IO.print(map_report(R.CCtx{kcfg("main"), mspec(), mch, sch, 0, mtr, None{}}))
