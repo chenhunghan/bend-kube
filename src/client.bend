@@ -772,6 +772,53 @@ def Client.replace(+cfg: K.Config, a: C.Api, name: String, obj: J.Json) ->
   IO(Result<&2, &2, KErr, J.Json>):
   Client.json(cfg, C.Req.replace(a, name, obj))
 
+# A PUT's retry on conflict: put, read the current object after a 409, put
+# again with its version.
+type REv is Data:
+  RyPut{}
+  RyPutDone{r: Result<&2, &2, KErr, J.Json>}
+  RyFailed{e: KErr, conflict: Bool}
+  RyGot{r: Result<&2, &2, KErr, J.Json>}
+
+# obj with the current object's resourceVersion.
+def Retry.rv(+obj: J.Json, +rv: String) -> J.Json:
+  J.Json.set(obj, "metadata", J.Json.set(J.Json.get(obj, "metadata"), "resourceVersion", J.JStr{rv}))
+
+# steps: fuel, at most four events per try.
+def Retry.go(steps: Nat, tries: Nat, ev: REv, +cfg: K.Config, +a: C.Api, +name: String, +obj: J.Json) ->
+  IO(Result<&2, &2, KErr, J.Json>):
+  match steps tries ev:
+    case 0n t e:
+      IO.pure(Result<&2, &2, KErr, J.Json>, Fail{KNet{0, "replace: out of steps"}})
+    case 1n+s t RyPut{}:
+      IO.bind(Result<&2, &2, KErr, J.Json>, Result<&2, &2, KErr, J.Json>,
+        Client.json(cfg, C.Req.replace(a, name, obj)), r => Retry.go(s, t, RyPutDone{r}, cfg, a, name, obj))
+    case 1n+s t RyPutDone{Done{j}}:
+      IO.pure(Result<&2, &2, KErr, J.Json>, Done{j})
+    case 1n+s t RyPutDone{Fail{+e}}:
+      Retry.go(s, t, RyFailed{e, U32.is_eq(KErr.code(e), 409)}, cfg, a, name, obj)
+    case 1n+s 1n+k RyFailed{e, True{}}:
+      IO.bind(Result<&2, &2, KErr, J.Json>, Result<&2, &2, KErr, J.Json>,
+        Client.json(cfg, C.Req.read(a, name)), g => Retry.go(s, k, RyGot{g}, cfg, a, name, obj))
+    case 1n+s t RyFailed{e, c}:
+      IO.pure(Result<&2, &2, KErr, J.Json>, Fail{e})
+    case 1n+s t RyGot{Done{+cur}}:
+      Retry.go(s, t, RyPut{}, cfg, a, name, Retry.rv(obj, C.Obj.rv(cur)))
+    case 1n+s t RyGot{Fail{e}}:
+      IO.pure(Result<&2, &2, KErr, J.Json>, Fail{e})
+
+# A PUT that rides out write conflicts (client-go's retry.RetryOnConflict
+# with a fresh read): after a 409 it reads the object, takes its
+# resourceVersion and puts obj again, up to tries more times. A failed read
+# (the object deleted meanwhile: 404) ends it with that error.
+# obj then overwrites whatever another writer changed in between, so use it
+# for objects this writer owns whole. Client.apply (server-side apply) and
+# Client.patch never conflict on a version and keep other writers' fields;
+# prefer them on busy objects such as pods.
+def Client.replace_retry(+cfg: K.Config, +a: C.Api, +name: String, +obj: J.Json, +tries: U32) ->
+  IO(Result<&2, &2, KErr, J.Json>):
+  Retry.go(Nat.mul(Nat.add(U32.to_nat(tries), 1n), 4n), U32.to_nat(tries), RyPut{}, cfg, a, name, obj)
+
 def Client.delete(+cfg: K.Config, a: C.Api, name: String) -> IO(Result<&2, &2, KErr, J.Json>):
   Client.json(cfg, C.Req.delete(a, name))
 

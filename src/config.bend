@@ -460,3 +460,17 @@ def Config.without_pool(c: Config) -> Config:
   match c:
     case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}:
       Config{h, p, b, ca, cert, key, tok, ns, None{}, lm, sn, fc}
+
+def Config.server.name(+sn: String, none: Bool) -> String:
+  match none:
+    case True{}:
+      ""
+    case False{}:
+      " (" ++ sn ++ ")"
+
+# The API server, for logs: its URL, and the certificate name when one is
+# set (tls-server-name). No credentials.
+def Config.server(c: Config) -> String:
+  match c:
+    case Config{h, p, b, ca, cert, key, tok, ns, pl, lm, +sn, fc}:
+      "https://" ++ h ++ ":" ++ U32.show(p) ++ b ++ Config.server.name(sn, String.is_empty(sn))

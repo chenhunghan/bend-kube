@@ -156,8 +156,19 @@ sleep 3
 hk delete configmap src-x-bend-e2e >/dev/null
 for _ in $(seq 1 30); do [ "$(hk get cm src-x-bend-e2e -o jsonpath='{.data.a}' 2>/dev/null)" = 2 ] && break; sleep 1; done
 [ "$(hk get cm src-x-bend-e2e -o jsonpath='{.data.a}' 2>/dev/null)" = 2 ] && pass "a copy deleted on the host maps back to its source and returns" || fail "sync restore"
-grep '"listing"' "$work/sync.log" | grep -q "bend-e2e-host" && pass "the host watch lists through its own config" || fail "host watch"
+grep '"listing"' "$work/sync.log" | grep "bend-e2e-host" | grep -q '(kubernetes.default.svc)' \
+  && pass "the host watch lists through its own config, and its log names that server" || fail "host watch"
 pkill -f "$work/sync" || true
+
+echo "== write conflicts"
+(cd tests/fixtures && bend conflict.bend -o "$work/conflict") >/dev/null 2>&1 || fail "build conflict"
+k create configmap conflict --from-literal=a=start >/dev/null
+KUBECONFIG="$work/kc.json" "$work/conflict" > "$work/conflict.log" 2>&1
+grep -q "^stale replace: fail 409" "$work/conflict.log" && pass "a stale PUT conflicts" || fail "no conflict: $(cat "$work/conflict.log")"
+grep -q "^stale replace_retry, 0 tries: fail 409" "$work/conflict.log" && pass "replace_retry with no tries keeps the 409" || fail "replace_retry 0"
+grep -q "^stale replace_retry, 3 tries: ok a=retried" "$work/conflict.log" && [ "$(k get cm conflict -o jsonpath='{.data.a}')" = retried ] \
+  && pass "replace_retry re-reads after a 409 and lands" || fail "replace_retry: $(cat "$work/conflict.log")"
+grep -q "^replace_retry of a missing object: fail 404" "$work/conflict.log" && pass "replace_retry of a missing object fails with 404" || fail "replace_retry 404"
 
 echo "== rate limit and drain"
 (cd tests/fixtures && bend slow.bend -o "$work/slow") >/dev/null 2>&1 || fail "build slow"

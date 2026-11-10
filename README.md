@@ -162,9 +162,12 @@ transforms kube-rs and controller-runtime users apply by hand.
     controller.
   - Under leader election every config takes the controllers' leadership
     fence, so no request to any cluster outlives the lease.
-  - Each such config gets a connection pool of its own, since a pool holds
-    connections to one server. A pool the config carried is dropped.
+  - Each other cluster gets one connection pool, shared by every watch and
+    reconcile that talks to it as the same user. A pool holds connections
+    to one server, so a pool the config carried is dropped.
     `Kb.Kube.connect(cfg, qps, burst)` gives it its own rate limit.
+  - Watch logs (`listing`, list and watch failures, backoff) carry a
+    `server` field: the API server's URL, and its `tls-server-name` when set.
 - `X.Spec.filter(s, preds)` (kube-runtime's `predicate_filter`): a primary
   change reconciles only when one of these differs from the cached object:
   `X.PGeneration{}` (the spec), `X.PLabels{}`, `X.PAnnotations{}` or
@@ -232,6 +235,12 @@ transforms kube-rs and controller-runtime users apply by hand.
   its fields wants. `Client.apply_with(.., force, ..)` doesn't force, so a
   field another manager owns (an HPA's `spec.replicas`) fails with 409
   instead of being taken over.
+  `Client.replace_retry(cfg, api, name, obj, tries)` is a PUT that survives
+  write conflicts (client-go's `RetryOnConflict`): after a 409 it reads the
+  object, takes its resourceVersion and puts again, up to `tries` more
+  times. It overwrites what other writers changed in between, so keep it
+  for objects one writer owns whole. On busy objects such as pods,
+  `Client.apply` and `Client.patch` don't conflict on a version at all.
 - **Deletes:** `Client.delete_with(cfg, api, name, C.DeleteOpts{..})` sets
   propagation (`Background`, `Foreground`, `Orphan`), a grace period, and
   uid or resourceVersion preconditions.

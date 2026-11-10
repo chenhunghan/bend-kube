@@ -159,34 +159,119 @@ def Kube.elect(+cfg: K.Config, l: Maybe<&2, E.LOpts>, drain: IO(Bool), work: IO(
     case None{}:
       IO.bind(Unit, Unit, IO.spawn(Unit, Kube.on_signal(drain)), u => work)
 
-# Each watch on another cluster gets a pool of its own: a pool holds
-# connections to one API server, never shared across servers.
-def Kube.pool_on(m: Maybe<&2, K.Config>) -> IO(Maybe<&2, K.Config>):
+# Connection pools for other clusters, one per cluster and identity
+# (K.Config.ident), shared by every watch and reconcile that talks to it
+# and never across servers: a pool holds connections to one server.
+type Pool is Data:
+  Pool{ident: String, pool: Chan(Socket)}
+
+def Pool.has(ps: List<&2, Pool>, +id: String) -> Bool:
+  match ps:
+    case Nil{}:
+      False{}
+    case Con{Pool{i, p}, t}:
+      Bool.or(String.eq(i, id), Pool.has(t, id))
+
+def Pool.pick(hit: Bool, p: Chan(Socket), rest: Maybe<&2, Chan(Socket)>) -> Maybe<&2, Chan(Socket)>:
+  match hit:
+    case True{}:
+      Some{p}
+    case False{}:
+      rest
+
+def Pool.find(ps: List<&2, Pool>, +id: String) -> Maybe<&2, Chan(Socket)>:
+  match ps:
+    case Nil{}:
+      None{}
+    case Con{Pool{i, p}, t}:
+      Pool.pick(String.eq(i, id), p, Pool.find(t, id))
+
+def Pool.cfg_in(cs: List<&2, K.Config>, +id: String) -> Bool:
+  match cs:
+    case Nil{}:
+      False{}
+    case Con{c, t}:
+      Bool.or(String.eq(K.Config.ident(c), id), Pool.cfg_in(t, id))
+
+def Pool.keep(+c: K.Config, dup: Bool, rest: List<&2, K.Config>) -> List<&2, K.Config>:
+  match dup:
+    case True{}:
+      rest
+    case False{}:
+      c <> rest
+
+# One config per cluster and identity.
+def Pool.unique(cs: List<&2, K.Config>) -> List<&2, K.Config>:
+  match cs:
+    case Nil{}:
+      Nil{}
+    case Con{+c, +t}:
+      Pool.keep(c, Pool.cfg_in(t, K.Config.ident(c)), Pool.unique(t))
+
+def Pool.of_on(m: Maybe<&2, K.Config>, rest: List<&2, K.Config>) -> List<&2, K.Config>:
+  match m:
+    case Some{c}:
+      c <> rest
+    case None{}:
+      rest
+
+def Pool.of_secs(ss: List<&2, X.Sec>) -> List<&2, K.Config>:
+  match ss:
+    case Nil{}:
+      Nil{}
+    case Con{s, t}:
+      Pool.of_on(X.Sec.cluster(s), Pool.of_secs(t))
+
+# Every other cluster the specs watch, in order, repeats included.
+def Pool.of_specs(ss: List<&2, X.Spec>) -> List<&2, K.Config>:
+  match ss:
+    case Nil{}:
+      Nil{}
+    case Con{+s, t}:
+      Pool.of_on(X.Spec.cluster_of(s), List.append(&2, K.Config, Pool.of_secs(X.Spec.secs(s)), Pool.of_specs(t)))
+
+def Pool.attach.got(+c: K.Config, m: Maybe<&2, Chan(Socket)>) -> K.Config:
+  match m:
+    case Some{p}:
+      K.Config.with_pool(c, p)
+    case None{}:
+      c
+
+def Pool.attach(m: Maybe<&2, K.Config>, +ps: List<&2, Pool>) -> Maybe<&2, K.Config>:
   match m:
     case None{}:
-      IO.pure(Maybe<&2, K.Config>, None{})
-    case Some{c}:
-      IO.bind(Chan(Socket), Maybe<&2, K.Config>, Chan.new(Socket, 8),
-        p => IO.pure(Maybe<&2, K.Config>, Some{K.Config.with_pool(c, p)}))
+      None{}
+    case Some{+c}:
+      Some{Pool.attach.got(c, Pool.find(ps, K.Config.ident(c)))}
 
-def Kube.pool_secs(ss: List<&2, X.Sec>) -> IO(List<&2, X.Sec>):
+def Pool.attach_secs(ss: List<&2, X.Sec>, +ps: List<&2, Pool>) -> List<&2, X.Sec>:
   match ss:
     case Nil{}:
-      IO.pure(List<&2, X.Sec>, Nil{})
-    case Con{X.Sec{a, l, f, r, d, ps, c}, t}:
-      IO.bind(Maybe<&2, K.Config>, List<&2, X.Sec>, Kube.pool_on(c),
-        c2 => IO.bind(List<&2, X.Sec>, List<&2, X.Sec>, Kube.pool_secs(t),
-          t2 => IO.pure(List<&2, X.Sec>, X.Sec{a, l, f, r, d, ps, c2} <> t2)))
+      Nil{}
+    case Con{X.Sec{a, l, f, r, d, pr, c}, t}:
+      X.Sec{a, l, f, r, d, pr, Pool.attach(c, ps)} <> Pool.attach_secs(t, ps)
 
-def Kube.pool_specs(ss: List<&2, X.Spec>) -> IO(List<&2, X.Spec>):
+def Pool.attach_specs(ss: List<&2, X.Spec>, +ps: List<&2, Pool>) -> List<&2, X.Spec>:
   match ss:
     case Nil{}:
-      IO.pure(List<&2, X.Spec>, Nil{})
-    case Con{X.Spec{p, l, fs, ps, secs, m, to, c}, t}:
-      IO.bind(Maybe<&2, K.Config>, List<&2, X.Spec>, Kube.pool_on(c),
-        c2 => IO.bind(List<&2, X.Sec>, List<&2, X.Spec>, Kube.pool_secs(secs),
-          secs2 => IO.bind(List<&2, X.Spec>, List<&2, X.Spec>, Kube.pool_specs(t),
-            t2 => IO.pure(List<&2, X.Spec>, X.Spec{p, l, fs, ps, secs2, m, to, c2} <> t2))))
+      Nil{}
+    case Con{X.Spec{p, l, fs, pr, secs, m, to, c}, t}:
+      X.Spec{p, l, fs, pr, Pool.attach_secs(secs, ps), m, to, Pool.attach(c, ps)} <> Pool.attach_specs(t, ps)
+
+# A new pool for each config.
+def Kube.pools(cs: List<&2, K.Config>) -> IO(List<&2, Pool>):
+  match cs:
+    case Nil{}:
+      IO.pure(List<&2, Pool>, Nil{})
+    case Con{c, t}:
+      IO.bind(Chan(Socket), List<&2, Pool>, Chan.new(Socket, 8),
+        p => IO.bind(List<&2, Pool>, List<&2, Pool>, Kube.pools(t),
+          rest => IO.pure(List<&2, Pool>, Pool{K.Config.ident(c), p} <> rest)))
+
+# The specs with every other cluster's config on its cluster's pool.
+def Kube.pool_specs(+ss: List<&2, X.Spec>) -> IO(List<&2, X.Spec>):
+  IO.bind(List<&2, Pool>, List<&2, X.Spec>, Kube.pools(Pool.unique(Pool.of_specs(ss))),
+    ps => IO.pure(List<&2, X.Spec>, Pool.attach_specs(ss, ps)))
 
 def Kube.timeouts(ss: List<&2, X.Spec>, +ms: U32) -> List<&2, X.Spec>:
   match ss:

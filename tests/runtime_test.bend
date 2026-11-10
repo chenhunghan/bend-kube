@@ -9,6 +9,7 @@ import ../src/control.bend as X
 import ../src/runtime.bend as R
 import ../src/client.bend as Cl
 import ../src/config.bend as K
+import ../src/kube.bend as Kb
 
 # Scenarios through the controller loop's pure steps: dispatch past keys
 # whose objects are gone, one pending wake per key however often it is
@@ -163,6 +164,20 @@ def plan(+ch: Chan(R.Msg)) -> String:
       X.Spec.of(cms()), cms(), X.RAll{}), kcfg("host")), cms(), X.RAll{}), kcfg("host")), pods(), X.RAll{}),
       kcfg("host"))], [ch, ch], Nil{}))
 
+# Pools per cluster: two watches on host and one on far (a primary on far
+# too) need two pools, not four; the controllers' own config needs none.
+def pool_hosts(cs: List<&2, K.Config>) -> String:
+  match cs:
+    case Nil{}:
+      ""
+    case Con{c, t}:
+      " " ++ K.Config.server(c) ++ pool_hosts(t)
+
+def pool_plan() -> String:
+  pool_hosts(Kb.Pool.unique(Kb.Pool.of_specs([X.Spec.on(X.Spec.watch_on(X.Spec.watches(X.Spec.watch_on(
+    X.Spec.watches(X.Spec.of(cms()), cms(), X.RAll{}), kcfg("host")), pods(), X.RAll{}), kcfg("host")),
+    kcfg("far")), X.Spec.of(pods())])))
+
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
   # (their objects deleted), the third is live: dispatch must reach it.
@@ -211,3 +226,5 @@ def main() -> IO(Unit):
       ++ " " ++ tokens(333, 100) ++ " " ++ tokens(1000, 100))
     ch : Chan(R.Msg) <- Chan.new(R.Msg, 1)
     IO.print("watches across clusters:" ++ plan(ch))
+    IO.print("pools for other clusters:" ++ pool_plan())
+    IO.print("a server in logs: " ++ K.Config.server(K.Config.with_server_name(kcfg("10.0.0.1"), "kubernetes.default.svc")))

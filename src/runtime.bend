@@ -228,25 +228,25 @@ def Drv.jitter(+ms: U32, r: Result<&1, &1, U32 & String, U32>) -> U32:
     case Fail{e}:
       ms
 
-def Drv.pause.go(+ms: U32, +fails: U32, path: String) -> IO(Unit):
+def Drv.pause.go(+ms: U32, +fails: U32, path: String, server: String) -> IO(Unit):
   IO.bind(Unit, Unit, L.Log.warn("list or watch failed; backing off",
-    [L.Log.kv("path", path), L.Log.kv("failures", U32.show(fails)),
+    [L.Log.kv("path", path), L.Log.kv("server", server), L.Log.kv("failures", U32.show(fails)),
       L.Log.kv("delay_ms", U32.show(ms))]), u => IO.sleep(ms))
 
 # Sleeps the watcher's backoff, with up to 50% jitter, when asked to.
-def Drv.pause(wait: Bool, +fails: U32, path: String) -> IO(Unit):
+def Drv.pause(wait: Bool, +fails: U32, path: String, server: String) -> IO(Unit):
   match wait:
     case True{}:
       IO.bind(Result<&1, &1, U32 & String, U32>, Unit, IO.random_u32(),
-        r => Drv.pause.go(Drv.jitter(W.Backoff.delay(fails), r), fails, path))
+        r => Drv.pause.go(Drv.jitter(W.Backoff.delay(fails), r), fails, path, server))
     case False{}:
       IO.pure(Unit, Unit{})
 
 # A list from its first page (startup, or a relist after 410 Gone).
-def Drv.note_list(first: Bool, path: String) -> IO(Unit):
+def Drv.note_list(first: Bool, path: String, server: String) -> IO(Unit):
   match first:
     case True{}:
-      L.Log.info("listing", [L.Log.kv("path", path)])
+      L.Log.info("listing", [L.Log.kv("path", path), L.Log.kv("server", server)])
     case False{}:
       IO.pure(Unit, Unit{})
 
@@ -282,6 +282,12 @@ def WCtx.path(c: WCtx) -> String:
     case WCtx{cfg, api, l, fs, subs}:
       C.Api.path(api)
 
+# The API server this watch talks to, for its logs.
+def WCtx.server(c: WCtx) -> String:
+  match c:
+    case WCtx{cfg, api, l, fs, subs}:
+      K.Config.server(cfg)
+
 def WCtx.cfg(c: WCtx) -> K.Config:
   match c:
     case WCtx{cfg, api, l, fs, subs}:
@@ -304,7 +310,7 @@ def Drv.run(outer: Nat, fuel: Nat, ev: DEv, +st: W.WState, +resp: H.Resp, +carry
     case o 1n+f DStart{}:
       match st:
         case W.WState{W.WList{+c}, +fl, +first}:
-          IO.bind(Unit, Unit, Drv.note_list(first, WCtx.path(ctx)),
+          IO.bind(Unit, Unit, Drv.note_list(first, WCtx.path(ctx), WCtx.server(ctx)),
             u => IO.bind(Result<&2, &2, Cl.KErr, J.Json>, Unit,
               Cl.Client.json(WCtx.cfg(ctx), WCtx.list_req(ctx, c)),
               r => Drv.run(o, f, DListed{r}, W.WState{W.WList{c}, fl, first}, resp, carry, ctx)))
@@ -317,7 +323,7 @@ def Drv.run(outer: Nat, fuel: Nat, ev: DEv, +st: W.WState, +resp: H.Resp, +carry
         carry, ctx)
     case o 1n+f DListed{Fail{+e}}:
       IO.bind(Unit, Unit, L.Log.warn("list failed",
-        [L.Log.kv("path", WCtx.path(ctx)), L.Log.kv("error", Cl.KErr.show(e))]),
+        [L.Log.kv("path", WCtx.path(ctx)), L.Log.kv("server", WCtx.server(ctx)), L.Log.kv("error", Cl.KErr.show(e))]),
         u => Drv.run(o, f, DStepped{W.Watcher.step(st, W.IListErr{Cl.KErr.code(e)}), None{}, False{}}, st,
           resp, carry, ctx))
     case o 1n+f DOpened{Done{N.Tls{s}}}:
@@ -326,7 +332,7 @@ def Drv.run(outer: Nat, fuel: Nat, ev: DEv, +st: W.WState, +resp: H.Resp, +carry
         p => Drv.run(o, f, DEv.recv(p), st, H.Http.resp.init(), Nil{}, ctx))
     case o 1n+f DOpened{Fail{e}}:
       IO.bind(Unit, Unit, L.Log.warn("watch failed to open",
-        [L.Log.kv("path", WCtx.path(ctx)), L.Log.kv("error", Drv.why(e))]),
+        [L.Log.kv("path", WCtx.path(ctx)), L.Log.kv("server", WCtx.server(ctx)), L.Log.kv("error", Drv.why(e))]),
         u => Drv.run(o, f, DStepped{W.Watcher.step(st, W.IWatchErr{0}), None{}, False{}}, st, resp, carry,
           ctx))
     case o 1n+f DRecv{s, Done{+bs}}:
@@ -336,7 +342,7 @@ def Drv.run(outer: Nat, fuel: Nat, ev: DEv, +st: W.WState, +resp: H.Resp, +carry
       Drv.run(o, f, DStepped{step, Some{s}, more}, st, r2, c2, ctx)
     case o 1n+f DRecv{s, Fail{e}}:
       IO.bind(Unit, Unit, L.Log.warn("watch read failed",
-        [L.Log.kv("path", WCtx.path(ctx)), L.Log.kv("error", Drv.why(e))]),
+        [L.Log.kv("path", WCtx.path(ctx)), L.Log.kv("server", WCtx.server(ctx)), L.Log.kv("error", Drv.why(e))]),
         u => Drv.run(o, f, DStepped{W.Watcher.step(st, W.IWatchErr{0}), Some{s}, False{}}, st, resp,
           carry, ctx))
     case o 1n+f DStepped{W.Step{st2, outs, wait}, s, more}:
@@ -347,7 +353,7 @@ def Drv.run(outer: Nat, fuel: Nat, ev: DEv, +st: W.WState, +resp: H.Resp, +carry
         N.Tls.recv(s, 65536, 350000), p => Drv.run(o, f, DEv.recv(p), st, resp, carry, ctx))
     case o 1n+f DNext{s, wait, more}:
       IO.bind(Unit, Unit, Drv.close(s),
-        u => IO.bind(Unit, Unit, Drv.pause(wait, WState.fails(st), WCtx.path(ctx)),
+        u => IO.bind(Unit, Unit, Drv.pause(wait, WState.fails(st), WCtx.path(ctx), WCtx.server(ctx)),
           u2 => Drv.run(o, f, DStart{}, st, H.Http.resp.init(), Nil{}, ctx)))
 
 # Controller
