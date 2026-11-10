@@ -58,6 +58,15 @@ def Tls.close(sock: Socket) -> IO(Unit):
   import "./effs/tls.c"
   import "./effs/tls.js"
 
+# The server side of a handshake on a connection from TCP.accept (a
+# webhook's): presents cert (a PEM certificate, with its chain) and key (a
+# PEM key); the client is not asked for a certificate. TLS 1.2 or later; ms
+# bounds the handshake (0 for 30s). Tls.send, Tls.recv and Tls.close then
+# carry the connection. A failure closes it. Native lane only.
+def Tls.accept(sock: Socket, cert: String, key: String, ms: U32) -> IO(Res(Socket)):
+  import "./effs/tls.c"
+  import "./effs/tls.js"
+
 # Opening
 # -------
 

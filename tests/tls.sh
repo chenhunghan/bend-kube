@@ -150,5 +150,38 @@ for lane in native js; do
   want $lane "proxy down" '^error: proxy: ' bend.test 24401 "HTTPS_PROXY=127.0.0.1:24498"
 done
 
+echo "== native: TLS server (webhooks)"
+bend examples/webhook.bend -o "$work/webhook.c" > "$work/build.log" 2>&1 || { cat "$work/build.log"; exit 1; }
+clang -std=c11 -O0 -g -fno-omit-frame-pointer -fsanitize="$SANITIZE" -fno-sanitize-recover=all \
+  "$work/webhook.c" -lpthread -lm -o "$work/webhook" > "$work/build.log" 2>&1 \
+  || { grep -v "warning\|note:\|^ " "$work/build.log" | tail -20; exit 1; }
+WEBHOOK_PORT=24420 WEBHOOK_CERT=$W/server.crt WEBHOOK_KEY=$W/server.key "$work/webhook" > "$work/webhook.log" 2>&1 &
+wh_pid=$!
+for _ in $(seq 1 50); do grep -q '"webhooks serving"' "$work/webhook.log" && break; sleep 0.1; done
+review() { printf '{"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","request":{"uid":"%s","object":{"metadata":{"name":"c"},"data":{"%s":"x"}}}}' "$1" "$2"; }
+post() { curl -s -m 10 --cacert $W/ca.crt --resolve bend.test:24420:127.0.0.1 https://bend.test:24420/validate --data-binary @-; }
+review u1 forbidden | post | grep -q '"uid":"u1","allowed":false' && pass "native: a verified client gets the review's answer" || fail "native: webhook answer"
+echo | "$OPENSSL" s_client -connect 127.0.0.1:24420 -tls1_1 >/dev/null 2>&1 && fail "native: webhook took TLS 1.1" || pass "native: webhook refuses TLS 1.1"
+[ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:24420/validate || true)" = 000 ] \
+  && pass "native: plain HTTP on the webhook's port gets no answer" || fail "native: plain HTTP answered"
+python3 -I -c "import socket; s = socket.create_connection(('127.0.0.1', 24420)); s.send(b'\x16\x03\x01\x00\xff'); s.close()"
+ok=0; for i in $(seq 1 20); do (review "c$i" plain | post | grep -q "\"uid\":\"c$i\",\"allowed\":true" && touch "$work/wh-ok-$i") & done; wait_n=0
+for _ in $(seq 1 100); do [ "$(ls "$work" | grep -c '^wh-ok-')" = 20 ] && break; sleep 0.1; done
+[ "$(ls "$work" | grep -c '^wh-ok-')" = 20 ] && pass "native: 20 clients at once, each answered" || fail "native: concurrent: $(ls "$work" | grep -c '^wh-ok-')/20"
+python3 -I -c "import json; print(json.dumps({'apiVersion':'admission.k8s.io/v1','kind':'AdmissionReview','request':{'uid':'big','object':{'data':{'k':'x'*2000000}}}}))" \
+  | post | grep -q '"uid":"big","allowed":true' && pass "native: a 2 MB review" || fail "native: big review"
+kill "$wh_pid"; wait "$wh_pid" 2>/dev/null || true
+if grep -E "ERROR: AddressSanitizer|runtime error" "$work/webhook.log" >/dev/null; then
+  fail "native: webhook: sanitizer report"; grep -v WARNING "$work/webhook.log" | head -30
+else
+  pass "native: webhook server ran clean under -fsanitize=$SANITIZE"
+fi
+echo "== js: TLS server"
+WEBHOOK_PORT=24421 WEBHOOK_CERT=$W/server.crt WEBHOOK_KEY=$W/server.key bend examples/webhook.bend > "$work/webhook-js.log" 2>&1 &
+for _ in $(seq 1 100); do grep -q '"webhooks serving"' "$work/webhook-js.log" && break; sleep 0.1; done
+review j plain | curl -s -m 5 --cacert $W/ca.crt --resolve bend.test:24421:127.0.0.1 https://bend.test:24421/validate --data-binary @- >/dev/null || true
+for _ in $(seq 1 30); do grep -q 'serving TLS needs the native lane' "$work/webhook-js.log" && break; sleep 0.1; done
+grep -q 'serving TLS needs the native lane' "$work/webhook-js.log" && pass "js: serving TLS says it needs the native lane" || fail "js: $(tail -3 "$work/webhook-js.log")"
+
 echo
 [ $fails = 0 ] && echo "all TLS tests pass" || { echo "$fails TLS tests failed"; exit 1; }

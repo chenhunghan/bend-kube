@@ -5,6 +5,7 @@
 # PROOF.bend rides along, so the laws can be rechecked from the hub.
 import Base
 import ./PROOF.bend as Proof
+import ./src/admission.bend as Admission
 import ./src/base64.bend as Base64
 import ./src/client.bend as Client
 import ./src/cond.bend as Cond
@@ -32,5 +33,6 @@ import ./src/time.bend as Time
 import ./src/typed.bend as Typed
 import ./src/utf8.bend as Utf8
 import ./src/watcher.bend as Watcher
+import ./src/webhook.bend as Webhook
 import ./src/ws.bend as Ws
 import ./src/yaml.bend as Yaml

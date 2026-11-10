@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 ctx=$(kubectl config current-context)
 case "$ctx" in *prod*) echo "refusing to run against context $ctx"; exit 1;; esac
 work=$(mktemp -d)
-trap 'kill $(jobs -p) 2>/dev/null || true; kubectl delete ns bend-e2e bend-e2e-host --wait=false >/dev/null 2>&1 || true; kubectl delete crd websites.bend-kube.dev --wait=false >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true; kubectl delete validatingwebhookconfiguration bend-e2e-validate --ignore-not-found >/dev/null 2>&1 || true; kubectl delete mutatingwebhookconfiguration bend-e2e-mutate --ignore-not-found >/dev/null 2>&1 || true; kubectl delete ns bend-e2e bend-e2e-host --wait=false >/dev/null 2>&1 || true; kubectl delete crd websites.bend-kube.dev --wait=false >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL $*"; exit 1; }
 k() { kubectl -n bend-e2e "$@"; }
@@ -201,6 +201,80 @@ k annotate --overwrite secret s bend-kube/for=m2 >/dev/null
 for _ in $(seq 1 20); do [ "$(since "$n1")" = "bend-e2e/m1 bend-e2e/m2 bend-e2e/m3 " ] && break; sleep 1; done
 [ "$(since "$n1")" = "bend-e2e/m1 bend-e2e/m2 bend-e2e/m3 " ] && pass "a mapped object that moves wakes its old and new primaries" || fail "mapped move: $(since "$n1")"
 pkill -f "$work/mapped" || true
+
+echo "== admission webhooks"
+# The API server calls a webhook running here: at WEBHOOK_HOST, or found
+# (kind's network gateway, lima's host.lima.internal). Only ConfigMaps in
+# bend-e2e labelled bend-kube/webhook=on are sent to it.
+wh_host=${WEBHOOK_HOST:-}
+if [ -z "$wh_host" ]; then
+  case "$ctx" in
+    kind-*) wh_host=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true) ;;
+    *) kubectl get nodes -o name | grep -q lima && wh_host=host.lima.internal || true ;;
+  esac
+fi
+if [ -z "$wh_host" ]; then
+  echo "skip admission webhooks: set WEBHOOK_HOST to an address the API server reaches this machine at"
+else
+  case "$wh_host" in *[!0-9.]*) san="DNS:$wh_host" ;; *) san="IP:$wh_host" ;; esac
+  leaf() {  # a serving certificate for $wh_host, signed by the test CA, serial $1
+    openssl req -newkey rsa:2048 -nodes -keyout "$work/wh.key.new" -out "$work/wh.csr" -subj "/CN=$wh_host" 2>/dev/null
+    printf 'subjectAltName=%s\n' "$san" > "$work/wh.ext"
+    openssl x509 -req -in "$work/wh.csr" -CA "$work/ca.crt" -CAkey "$work/ca.key" -set_serial "$1" -days 1 \
+      -extfile "$work/wh.ext" -out "$work/wh.crt.new" 2>/dev/null
+    mv "$work/wh.key.new" "$work/wh.key"; mv "$work/wh.crt.new" "$work/wh.crt"
+  }
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$work/ca.key" -out "$work/ca.crt" -subj /CN=bend-e2e-ca -days 1 2>/dev/null
+  leaf 4097
+  (cd examples && bend webhook.bend -o "$work/webhook") >/dev/null 2>&1 || fail "build webhook"
+  WEBHOOK_PORT=19443 WEBHOOK_CERT="$work/wh.crt" WEBHOOK_KEY="$work/wh.key" "$work/webhook" > "$work/webhook.log" 2>&1 &
+  ca=$(base64 < "$work/ca.crt" | tr -d '\n')
+  for kind in validate mutate; do
+    case $kind in validate) K=ValidatingWebhookConfiguration ;; mutate) K=MutatingWebhookConfiguration ;; esac
+    kubectl apply -f - >/dev/null <<YAML
+apiVersion: admissionregistration.k8s.io/v1
+kind: $K
+metadata:
+  name: bend-e2e-$kind
+webhooks:
+  - name: $kind.bend-kube.dev
+    clientConfig:
+      url: https://$wh_host:19443/$kind
+      caBundle: $ca
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["configmaps"]
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: bend-e2e
+    objectSelector:
+      matchLabels:
+        bend-kube/webhook: "on"
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 5
+YAML
+  done
+  wh_cm() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\n  labels:\n    bend-kube/webhook: "on"\ndata:\n  %s: x\n' "$1" "$2" | k apply -f - 2>&1; }
+  out=""; for _ in $(seq 1 20); do out=$(wh_cm wh-ok plain) && break; sleep 1; done
+  [ "$(k get cm wh-ok -o jsonpath='{.metadata.labels.bend-kube/mutated}')" = true ] \
+    && pass "a mutating webhook's JSON patch labels the object" || fail "mutate: $out $(cat "$work/webhook.log")"
+  out=$(wh_cm wh-bad forbidden) && fail "a forbidden ConfigMap was admitted"
+  echo "$out" | grep -q 'the key "forbidden" is not allowed' && pass "a validating webhook denies with its message" || fail "deny: $out"
+  out=$(wh_cm wh-old deprecated) || fail "deprecated: $out"
+  echo "$out" | grep -q 'Warning: the key "deprecated" will be refused soon' && pass "a webhook's warning reaches the client" || fail "warning: $out"
+  serial() { echo | openssl s_client -connect "127.0.0.1:19443" -servername "$wh_host" 2>/dev/null | openssl x509 -noout -serial 2>/dev/null; }
+  [ "$(serial)" = "serial=1001" ] || fail "first serial: $(serial)"
+  leaf 8194
+  [ "$(serial)" = "serial=2002" ] && wh_cm wh-new plain >/dev/null \
+    && pass "a rotated certificate is served from the next connection, without a restart" || fail "rotation: $(serial)"
+  kubectl delete validatingwebhookconfiguration bend-e2e-validate >/dev/null
+  kubectl delete mutatingwebhookconfiguration bend-e2e-mutate >/dev/null
+  pkill -f "$work/webhook" || true
+fi
 
 echo "== rate limit and drain"
 (cd tests/fixtures && bend slow.bend -o "$work/slow") >/dev/null 2>&1 || fail "build slow"

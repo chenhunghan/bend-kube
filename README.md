@@ -65,6 +65,7 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/lease.bend` | client-go `leaderelection.tryAcquireOrRenew` | yes |
 | `src/finalizer.bend` | kube-runtime `finalizer` (decisions) | yes |
 | `src/proxy.bend` | Go's `ProxyFromEnvironment` and the CONNECT exchange | yes |
+| `src/admission.bend` | controller-runtime `admission.Response`, `conversion` reviews, request framing | yes |
 | `src/net.bend` + `src/effs/tls.c` | rustls / crypto/tls (OpenSSL via `dlopen`) | effect |
 | `src/sys.bend` + `src/effs/sys.c` | wall clock, SIGTERM | effect |
 | `src/client.bend` | kube-client `Client`, `Api<K>` verbs | IO |
@@ -74,6 +75,7 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/leader.bend` | client-go `leaderelection.RunOrDie` | IO |
 | `src/helpers.bend` | kube-runtime `finalizer()`, client-go `EventRecorder` | IO |
 | `src/serve.bend` | controller-runtime `/healthz` `/readyz` `/metrics` | IO |
+| `src/webhook.bend` | controller-runtime `webhook.Server` (HTTPS) | IO |
 | `src/log.bend` | structured JSON logs | IO |
 | `src/kube.bend` | the `kube` facade: `Kube.run` | IO |
 
@@ -496,6 +498,25 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   absurd by the wall clock stepping back counts as 0.
 - Events go to `events.k8s.io/v1` (`Event.publish`).
 
+**Webhooks:** `Wh.Webhook.serve(~admit, ~convert, port, cert, key)` serves
+admission and conversion webhooks over HTTPS (controller-runtime's webhook
+server), and `Wh.Webhook.admission(~admit, port, cert, key)` serves
+admission only.
+- `admit(path, request)` answers an `A.Verdict`: `A.Verdict.allow()`,
+  `A.Verdict.deny(msg)` (403), `A.Verdict.deny_with(code, msg)`,
+  `A.Verdict.patch(ops)` with JSON-patch operations (`A.Patch.op`), and
+  `A.Verdict.warn(v, text)`. It may read the API server. The path routes
+  between handlers (`/validate`, `/mutate`).
+- `convert(obj, apiVersion)` is pure. It answers the object in the desired
+  version, or why it can't be; one failure fails the whole review.
+- `cert` and `key` are PEM file paths (a mounted Secret, such as
+  cert-manager's `tls.crt` and `tls.key`). They are read for every
+  connection, so a rotated certificate is served without a restart.
+- Each connection reads at most 16 MiB within 10s and gets one answer.
+  Webhooks answer on every replica: start the server with `IO.spawn` before
+  `Kube.control`, not under leader election.
+- The server side of TLS (`Tls.accept`) runs on the native lane only.
+
 **Parallelism:** the watch lines that arrive in one read are separate JSON
 documents. They are decoded and parsed as balanced Bend parallel calls
 (`Drv.inputs.par`), and `tests/par_test.bend` checks that the result is the
@@ -504,7 +525,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 75 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 78 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -557,6 +578,11 @@ loop.
     on the controllers' config;
   - a spec without its own reconcile timeout takes the manager's, and its
     own wins.
+- **Webhooks:**
+  - a denial without a code answers 403 with its message, for the request's
+    uid, in the review's apiVersion;
+  - an allowed request without a patch carries no patch and no status;
+  - a request without Content-Length or chunked framing has no body.
 - **Leader election:**
   - another holder's Lease seen changing within its duration is live;
   - our clock stepping back doesn't expire it;
@@ -656,6 +682,12 @@ Publishing needs the `BENDAI_KEY` repository secret: the `key` field of
   `RRef` watch, so a change to the Secret reconciles the ConfigMap. The
   Secret is read from the cache, and the outputs are counted with
   `X.Ctx.children`.
+- `examples/webhook.bend` serves a validating, a mutating and a
+  conversion webhook. It denies ConfigMaps with a `forbidden` key, warns
+  about a `deprecated` one, labels every ConfigMap with a JSON patch, and
+  converts `spec.size` (v1) to `spec.replicas` (v2).
+- `examples/sync.bend` is a two-cluster syncer (`X.Spec.watch_on`,
+  `X.RAnnotated`, `X.Spec.watch_filter`).
 - `examples/pool_bench.bend` measures pooled against fresh connections.
 - `examples/smoke.bend` makes one-shot client calls.
 - **JS lane:** controllers also run with `bend file.bend`, no native build.
@@ -731,13 +763,10 @@ in-cluster; `tests/e2e.sh` also passes on kind (Kubernetes v1.35):
   cache. That is linear in the cache's size, which is fine for thousands of
   objects.
 
-- **Webhooks.** There is no HTTPS server, so no admission or conversion
-  webhooks.
-  - Validate with CRD schemas, CEL rules (`x-kubernetes-validations`) and
-    `ValidatingAdmissionPolicy`.
-  - An operator that needs admission or conversion webhooks runs them as a
-    separate service. A TLS sidecar alone is not enough: the webhook
-    protocol (AdmissionReview, ConversionReview) must be served too.
+- **Webhook TLS.** The webhook server presents a certificate but asks for
+  none, and speaks HTTP/1.1 only, as the API server does to webhooks. Prefer
+  CRD schemas, CEL rules (`x-kubernetes-validations`) and
+  `ValidatingAdmissionPolicy` where they suffice; they need no server.
 - **Mappers.** One mapper serves all of a process's `RMap` watches (`n`
   and `X.Ctx.idx` tell them apart), because a Bend callback is fixed at
   compile time and can't be stored in a spec.
