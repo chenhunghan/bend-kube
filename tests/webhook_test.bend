@@ -86,3 +86,7 @@ def main() -> IO(Unit):
     IO.print("convert fails: " ++ J.Json.show(A.Wh.conversion_review(~conv, js("{\"apiVersion\": \"apiextensions.k8s.io/v1\", \"kind\": \"ConversionReview\", \"request\": {\"uid\": \"c2\", \"desiredAPIVersion\": \"x.dev/v3\", \"objects\": [{\"apiVersion\": \"x.dev/v1\"}]}}"))))
     IO.print("kinds: " ++ kind(A.Review.of("{\"kind\": \"AdmissionReview\"}")) ++ ", " ++ kind(A.Review.of("{\"kind\": \"ConversionReview\"}"))
       ++ ", " ++ kind(A.Review.of("{\"kind\": \"Pod\"}")) ++ ", " ++ kind(A.Review.of("{oops")))
+    IO.print("declared too big: " ++ yes(A.Rq.too_big(feed_all(["POST / HTTP/1.1\r\nContent-Length: 9000000\r\n\r\n"], A.Rq.init()), A.Rq.max_bytes()))
+      ++ ", small: " ++ yes(A.Rq.too_big(feed_all(["POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n"], A.Rq.init()), A.Rq.max_bytes()))
+      ++ ", chunked under the cap: " ++ yes(A.Rq.too_big(feed_all(["POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n"], A.Rq.init()), A.Rq.max_bytes())))
+    IO.print("end of stream mid-request leaves it unfinished: " ++ got(feed_all(["POST /v HTTP/1.1\r\nContent-Length: 11\r\n\r\n{", ""], A.Rq.init())))

@@ -36,6 +36,10 @@ leaf server "IP:127.0.0.1,DNS:bend.test" serverAuth -days 2
 leaf wrongname "DNS:other.test" serverAuth -days 2
 leaf expired "IP:127.0.0.1" serverAuth -not_before 20200101000000Z -not_after 20200102000000Z
 leaf client "DNS:client" clientAuth -days 2
+# a certificate naming the server only in its CN, with no SAN
+ossl req -newkey rsa:2048 -nodes -keyout cnonly.key -out cnonly.csr -subj "/CN=bend.test"
+printf 'extendedKeyUsage=serverAuth\n' > cnonly.ext
+ossl x509 -req -in cnonly.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out cnonly.crt -extfile cnonly.ext -days 2
 cd - >/dev/null
 pass certificates
 
@@ -58,6 +62,7 @@ srv() {  # srv PORT ARGS...: an s_server that answers GETs with a status page
 }
 W=$work
 srv 24401 -cert $W/server.crt -key $W/server.key
+srv 24415 -cert $W/cnonly.crt -key $W/cnonly.key
 srv 24402 -cert $W/wrongname.crt -key $W/wrongname.key
 srv 24403 -cert $W/expired.crt -key $W/expired.key
 srv 24404 -cert $W/server.crt -key $W/server.key -tls1_1 -cipher DEFAULT@SECLEVEL=0
@@ -113,6 +118,7 @@ for lane in native js; do
   want $lane "wrong name rejected" 'server certificate rejected' 127.0.0.1 24402
   want $lane "tls-server-name verifies instead of the host" '^ok HTTP/1.0 200' 127.0.0.1 24401 "PROBE_SERVER_NAME=bend.test"
   want $lane "tls-server-name must match" 'server certificate rejected' 127.0.0.1 24401 "PROBE_SERVER_NAME=other.test"
+  want $lane "a name only in the CN is not taken" '^error' 127.0.0.1 24415 "PROBE_SERVER_NAME=bend.test"
   want $lane "expired certificate rejected" 'server certificate rejected' 127.0.0.1 24403
   want $lane "TLS 1.1 refused" '^error: TLS' 127.0.0.1 24404
   want $lane "missing client certificate refused" '^error' 127.0.0.1 24405
@@ -161,6 +167,12 @@ for _ in $(seq 1 50); do grep -q '"webhooks serving"' "$work/webhook.log" && bre
 review() { printf '{"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","request":{"uid":"%s","object":{"metadata":{"name":"c"},"data":{"%s":"x"}}}}' "$1" "$2"; }
 post() { curl -s -m 10 --cacert $W/ca.crt --resolve bend.test:24420:127.0.0.1 https://bend.test:24420/validate --data-binary @-; }
 review u1 forbidden | post | grep -q '"uid":"u1","allowed":false' && pass "native: a verified client gets the review's answer" || fail "native: webhook answer"
+if python3 -I -c "import socket; s = socket.socket(socket.AF_INET6); s.bind(('::1', 0))" 2>/dev/null; then
+  review u6 plain | curl -s -m 10 --cacert $W/ca.crt --resolve "bend.test:24420:[::1]" https://bend.test:24420/validate --data-binary @- \
+    | grep -q '"uid":"u6","allowed":true' && pass "native: the webhook answers on IPv6 too (dual-stack)" || fail "native: IPv6"
+else
+  echo "skip native: IPv6 (no ::1 here)"
+fi
 echo | "$OPENSSL" s_client -connect 127.0.0.1:24420 -tls1_1 >/dev/null 2>&1 && fail "native: webhook took TLS 1.1" || pass "native: webhook refuses TLS 1.1"
 [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:24420/validate || true)" = 000 ] \
   && pass "native: plain HTTP on the webhook's port gets no answer" || fail "native: plain HTTP answered"
@@ -173,6 +185,36 @@ for _ in $(seq 1 100); do [ "$(ls "$work" | grep -c '^wh-ok-')" = 20 ] && break;
 python3 -I -c "import json; print(json.dumps({'apiVersion':'admission.k8s.io/v1','kind':'AdmissionReview','request':{'uid':'big','object':{'data':{'k':'x'*2000000}}}}))" \
   | curl -s -m 120 --cacert $W/ca.crt --resolve bend.test:24420:127.0.0.1 https://bend.test:24420/validate --data-binary @- \
   | grep -q '"uid":"big","allowed":true' && pass "native: a 2 MB review" || fail "native: big review"
+# A client that handshakes, sends half a request and closes cleanly
+# (close_notify) must cost nothing afterwards: no spinning read.
+cpu() {  # the server's CPU time so far, in hundredths of a second
+  if [ -r "/proc/$wh_pid/stat" ]; then awk '{ print $14 + $15 }' "/proc/$wh_pid/stat"  # clock ticks (100/s)
+  else ps -o time= -p "$wh_pid" | awk -F'[:.]' '{ print ($1 * 60 + $2) * 100 + $3 }'; fi
+}
+python3 -I - "$W" <<'PY'
+import socket, ssl, sys
+w = sys.argv[1]
+ctx = ssl.create_default_context(cafile=w + "/ca.crt")
+ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)  # the test CA's leaves lack an AKI
+for _ in range(5):
+    s = ctx.wrap_socket(socket.create_connection(("127.0.0.1", 24420)), server_hostname="bend.test")
+    s.sendall(b"POST /validate HTTP/1.1\r\nContent-Length: 100\r\n\r\n{")
+    s = s.unwrap()
+    s.close()
+PY
+sleep 1; c0=$(cpu); sleep 3; c1=$(cpu)
+[ $((c1 - c0)) -lt 50 ] && review u2 plain | post | grep -q '"uid":"u2"' \
+  && pass "native: a client that closes mid-request costs nothing after" || fail "native: early close: cpu +$((c1 - c0))cs"
+python3 -I - "$W" > "$work/wh-big.txt" <<'PY'
+import socket, ssl, sys
+w = sys.argv[1]
+ctx = ssl.create_default_context(cafile=w + "/ca.crt")
+ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)  # the test CA's leaves lack an AKI
+s = ctx.wrap_socket(socket.create_connection(("127.0.0.1", 24420), timeout=5), server_hostname="bend.test")
+s.sendall(b"POST /validate HTTP/1.1\r\nContent-Length: 99999999\r\n\r\n")
+print(s.recv(200).decode(errors="replace"))
+PY
+grep -q "^HTTP/1.1 413" "$work/wh-big.txt" && pass "native: a Content-Length over the cap is refused before its body" || fail "native: declared size: $(head -1 "$work/wh-big.txt")"
 kill "$wh_pid"; wait "$wh_pid" 2>/dev/null || true
 if grep -E "ERROR: AddressSanitizer|runtime error" "$work/webhook.log" >/dev/null; then
   fail "native: webhook: sanitizer report"; grep -v WARNING "$work/webhook.log" | head -30

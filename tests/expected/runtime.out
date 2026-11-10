@@ -26,3 +26,4 @@ pools for other clusters: https://far:443 https://host:443
 a server in logs: https://10.0.0.1:443 (kubernetes.default.svc)
 watchdog, 2s timeout: at 2500 -; at 3001 ns/a; nothing running -; across the clock's wrap - then ns/w
 mapped relation: a: queued, b: queued, pending left: 0; objects for the mapper: first batch 1, second 2
+kubeconfig CA: bad base64 !kubeconfig: certificate-authority-data is not base64; good i:pem; none -

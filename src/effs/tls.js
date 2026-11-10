@@ -55,7 +55,10 @@ parentPort.once("message", ({ port: p }) => {
       // checked as that IP and sends no SNI (Node, given a socket, would
       // otherwise check "localhost")
       if (!net.isIP(m.host)) opts.servername = m.host;
-      opts.checkServerIdentity = (_, cert) => tls.checkServerIdentity(m.host, cert);
+      // as on the native lane (and in Go): only SANs name the server, never the CN
+      opts.checkServerIdentity = (_, cert) => cert.subjectaltname
+        ? tls.checkServerIdentity(m.host, cert)
+        : Object.assign(new Error("certificate has no subjectAltName"), { code: "ERR_TLS_CERT_ALTNAME_INVALID" });
       if (m.ca) opts.ca = m.ca;
       if (m.cert) { opts.cert = m.cert; opts.key = m.key; }
       let s;

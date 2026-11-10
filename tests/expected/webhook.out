@@ -11,3 +11,5 @@ patch and warn: {"apiVersion":"admission.k8s.io/v1beta1","kind":"AdmissionReview
 convert: {"apiVersion":"apiextensions.k8s.io/v1","kind":"ConversionReview","response":{"uid":"c1","convertedObjects":[{"apiVersion":"x.dev/v2","kind":"T"},{"apiVersion":"x.dev/v2","kind":"T","metadata":{"name":"b"}}],"result":{"status":"Success"}}}
 convert fails: {"apiVersion":"apiextensions.k8s.io/v1","kind":"ConversionReview","response":{"uid":"c2","convertedObjects":[],"result":{"status":"Failure","message":"no way to x.dev/v3"}}}
 kinds: admission, conversion, bad: not an AdmissionReview or ConversionReview: kind Pod, bad: bad JSON: expected a key
+declared too big: yes, small: no, chunked under the cap: no
+end of stream mid-request leaves it unfinished: done no, broken no, POST /v body {

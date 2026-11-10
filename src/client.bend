@@ -205,6 +205,8 @@ def Src.load(s: K.Src) -> IO(Res(String)):
         Process.run(cmd, Strs.own(args), "", 1048576, 30000), r => Exec.token(cmd, r))
     case K.NoSrc{}:
       IO.pure(Res(String), Done{""})
+    case K.BadSrc{m}:
+      IO.pure(Res(String), Fail{(22, m)})
 
 # Credentials
 # -----------
