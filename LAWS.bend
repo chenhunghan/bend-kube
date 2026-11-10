@@ -12,6 +12,7 @@ import ./src/lease.bend as E
 import ./src/control.bend as X
 import ./src/cond.bend as Co
 import ./src/config.bend as K
+import ./src/admission.bend as A
 
 # LAWS
 # ====
@@ -684,4 +685,31 @@ law map_defers_to_mapper:
 law map_split_keeps_keys:
   {X.Mapped.split([X.Mapped.mark() ++ "{}", "ns/a"], 2)
     == X.Split{["ns/a"], [X.Mapped{2, "{}"}]} : X.Split}
+
+# Webhooks (controller-runtime's admission and conversion answers)
+# ---------------------------------------------------------------
+
+# A denial without a code answers 403 with its message, for the request's
+# uid, in the review's own apiVersion.
+law admission_deny_is_403:
+  for av: String
+  for uid: String
+  for m: String
+  {A.Wh.admission_review(av, uid, A.Verdict.deny(m))
+    == J.Json.obj([J.KV{"apiVersion", J.JStr{av}}, J.KV{"kind", J.JStr{"AdmissionReview"}},
+      J.KV{"response", J.Json.obj([J.KV{"uid", J.JStr{uid}}, J.KV{"allowed", J.JBool{False{}}},
+        J.KV{"status", J.Json.obj([J.KV{"code", J.JNum{"403"}}, J.KV{"message", J.JStr{m}}])}])}]) : J.Json}
+
+# An allowed request without a patch carries no patch and no status.
+law admission_allow_is_bare:
+  for av: String
+  for uid: String
+  {A.Wh.admission_review(av, uid, A.Verdict.allow())
+    == J.Json.obj([J.KV{"apiVersion", J.JStr{av}}, J.KV{"kind", J.JStr{"AdmissionReview"}},
+      J.KV{"response", J.Json.obj([J.KV{"uid", J.JStr{uid}}, J.KV{"allowed", J.JBool{True{}}}])}]) : J.Json}
+
+# A request without Content-Length or chunked framing has no body: it is
+# complete at its blank line, not read to the end of the stream.
+law request_without_length_is_done:
+  {A.Rq.done(A.Rq.feed(A.Rq.init(), U.Utf8.encode("GET /x HTTP/1.1\r\nHost: h\r\n\r\n"))) == True{} : Bool}
 

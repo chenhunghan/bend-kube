@@ -1,0 +1,13 @@
+in pieces: done yes, broken no, POST /validate body {"a": true}
+not yet: done no, broken no, POST /v body {"a":
+chunked: done yes, broken no, POST /m body {"b":1}
+no body: done yes, broken no, GET /healthz body 
+broken: done no, broken yes, POST / body 
+size: 38
+allow: {"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","response":{"uid":"u1","allowed":true}}
+deny: {"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","response":{"uid":"u2","allowed":false,"status":{"code":403,"message":"no"}}}
+deny 422: {"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","response":{"uid":"u3","allowed":false,"status":{"code":422,"message":"bad spec"}}}
+patch and warn: {"apiVersion":"admission.k8s.io/v1beta1","kind":"AdmissionReview","response":{"uid":"u4","allowed":true,"patchType":"JSONPatch","patch":"W3sib3AiOiJhZGQiLCJwYXRoIjoiL21ldGFkYXRhL2xhYmVscy94IiwidmFsdWUiOiJ5In1d","warnings":["careful"]}}
+convert: {"apiVersion":"apiextensions.k8s.io/v1","kind":"ConversionReview","response":{"uid":"c1","convertedObjects":[{"apiVersion":"x.dev/v2","kind":"T"},{"apiVersion":"x.dev/v2","kind":"T","metadata":{"name":"b"}}],"result":{"status":"Success"}}}
+convert fails: {"apiVersion":"apiextensions.k8s.io/v1","kind":"ConversionReview","response":{"uid":"c2","convertedObjects":[],"result":{"status":"Failure","message":"no way to x.dev/v3"}}}
+kinds: admission, conversion, bad: not an AdmissionReview or ConversionReview: kind Pod, bad: bad JSON: expected a key

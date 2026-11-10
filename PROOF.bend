@@ -266,3 +266,12 @@ def Laws.map_defers_to_mapper(res, o, prim):
 
 def Laws.map_split_keeps_keys():
   {==}
+
+def Laws.admission_deny_is_403(av, uid, m):
+  {==}
+
+def Laws.admission_allow_is_bare(av, uid):
+  {==}
+
+def Laws.request_without_length_is_done():
+  {==}

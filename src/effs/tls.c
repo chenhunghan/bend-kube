@@ -1,7 +1,7 @@
 // TLS
 // ===
 
-// A TLS client over OpenSSL 3 (or 1.1.1), loaded with dlopen so the program
+// A TLS client (and, for webhooks, a server) over OpenSSL 3 (or 1.1.1), loaded with dlopen so the program
 // builds with Bend's plain clang line and needs no OpenSSL headers. A TLS
 // connection is a Socket handle whose fd indexes tls_conn; Bend code holds
 // it inside a Tls value, so the raw TCP effects never touch it.
@@ -30,6 +30,7 @@
 typedef struct {
   int           (*init_ssl)(uint64_t, const void*);
   const void*   (*client_method)(void);
+  const void*   (*server_method)(void);
   void*         (*ctx_new)(const void*);
   void          (*ctx_free)(void*);
   long          (*ctx_ctrl)(void*, int, long, void*);
@@ -48,6 +49,7 @@ typedef struct {
   void*         (*ssl_param)(void*);
   int           (*param_ip)(void*, const char*);
   int           (*ssl_connect)(void*);
+  int           (*ssl_accept)(void*);
   int           (*ssl_read)(void*, void*, int);
   int           (*ssl_write)(void*, const void*, int);
   int           (*ssl_get_error)(const void*, int);
@@ -123,6 +125,7 @@ static int tls_load_now(void) {
   }
   TLS_SYM(s, init_ssl, "OPENSSL_init_ssl");
   TLS_SYM(s, client_method, "TLS_client_method");
+  TLS_SYM(s, server_method, "TLS_server_method");
   TLS_SYM(s, ctx_new, "SSL_CTX_new");
   TLS_SYM(s, ctx_free, "SSL_CTX_free");
   TLS_SYM(s, ctx_ctrl, "SSL_CTX_ctrl");
@@ -140,6 +143,7 @@ static int tls_load_now(void) {
   TLS_SYM(s, ssl_set1_host, "SSL_set1_host");
   TLS_SYM(s, ssl_param, "SSL_get0_param");
   TLS_SYM(s, ssl_connect, "SSL_connect");
+  TLS_SYM(s, ssl_accept, "SSL_accept");
   TLS_SYM(s, ssl_read, "SSL_read");
   TLS_SYM(s, ssl_write, "SSL_write");
   TLS_SYM(s, ssl_get_error, "SSL_get_error");
@@ -445,6 +449,84 @@ Term tls_secure_run(Env e, Term* f, IoWork* w) {
   return tls_secure_more(e, w);
 }
 
+// Drives the server side of a handshake on the loop: SSL_accept on the
+// non-blocking socket, parking while it waits, under one deadline.
+static Term tls_accept_more(Env e, IoWork* w) {
+  TlsOpen* o = (TlsOpen*)w->data;
+  int ret = tls_lib.ssl_accept(o->ssl);
+  if (ret == 1) {
+    tls_conn[o->sock] = o->ssl;
+    Term r = io_done(e, io_hand(o->sock));
+    tls_free_open(o);
+    return r;
+  }
+  int k = tls_lib.ssl_get_error(o->ssl, ret);
+  if (k == TLS_WANT_READ || k == TLS_WANT_WRITE) {
+    if (!tls_late(w)) {
+      return io_wait_on(w, o->sock, k == TLS_WANT_READ ? POLLIN : POLLOUT, w->time,
+        tls_accept_more);
+    }
+    tls_lib.err_clear();
+    o->code = ETIMEDOUT;
+    snprintf(o->text, sizeof o->text, "TLS: handshake timed out");
+  } else {
+    tls_fail(o, ECONNRESET, "TLS: handshake failed");
+  }
+  return tls_secure_fail(e, w);
+}
+
+// Tls.accept(sock, cert_pem, key_pem, ms): the server side of a handshake
+// on a connection from TCP.accept, presenting cert (with its chain) and
+// key. The client is not asked for a certificate. TLS 1.2 or later. A
+// failure closes the connection.
+Term tls_accept_run(Env e, Term* f, IoWork* w) {
+  int fd = (int)io_hand_v(f[0]);
+  if (fd < 0 || fd >= 65536) {
+    if (fd >= 0) {
+      close(fd);
+    }
+    return io_fail(e, EBADF, "TLS: descriptor past the table");
+  }
+  TlsOpen* o = io_mem(calloc(1, sizeof *o));
+  u64 n;
+  o->sock = fd;
+  o->cert = io_cstr(e, f[1], &n);
+  o->key  = io_cstr(e, f[2], &n);
+  w->data = (char*)o;
+  w->time = io_until((u32)f[3] == 0 ? 30000 : f[3]);
+  tls_conn[fd] = NULL;
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+#ifdef SO_NOSIGPIPE
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+  signal(SIGPIPE, SIG_IGN);
+  if (tls_load() != 1) {
+    o->code = ENOTSUP;
+    snprintf(o->text, sizeof o->text, "%s", tls_why);
+    return tls_secure_fail(e, w);
+  }
+  void* ctx = tls_lib.ctx_new(tls_lib.server_method());
+  if (ctx == NULL) {
+    tls_fail(o, ENOMEM, "TLS: SSL_CTX_new");
+    return tls_secure_fail(e, w);
+  }
+  tls_lib.ctx_ctrl(ctx, TLS_CTRL_MIN_PROTO, TLS_1_2, NULL);
+  if (*o->cert == 0 || !tls_use_client(o, ctx)) {
+    tls_fail(o, EINVAL, "TLS: bad server certificate or key");
+    tls_lib.ctx_free(ctx);
+    return tls_secure_fail(e, w);
+  }
+  o->ssl = tls_lib.ssl_new(ctx);
+  tls_lib.ctx_free(ctx);
+  if (o->ssl == NULL) {
+    tls_fail(o, ENOMEM, "TLS: SSL_new");
+    return tls_secure_fail(e, w);
+  }
+  tls_lib.ssl_set_fd(o->ssl, fd);
+  return tls_accept_more(e, w);
+}
+
 // The error of an SSL call that did not finish: 0 with *evts set when it
 // must wait for the socket, else an errno.
 static u32 tls_why_not(void* ssl, int ret, short* evts) {
@@ -638,5 +720,11 @@ static void __attribute__((constructor)) tls_recv_use(void) {
 #ifdef CID(Tls.close)
 static void __attribute__((constructor)) tls_close_use(void) {
   io_eff(CID(Tls.close), tls_close_run);
+}
+#endif
+
+#ifdef CID(Tls.accept)
+static void __attribute__((constructor)) tls_accept_use(void) {
+  io_eff(CID(Tls.accept), tls_accept_run);
 }
 #endif
