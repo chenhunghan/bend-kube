@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/chenhunghan/bend-kube/compare/v0.8.0...v0.8.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* harden the webhook server and TLS from the production review ([#27](https://github.com/chenhunghan/bend-kube/issues/27)) ([2ac6016](https://github.com/chenhunghan/bend-kube/commit/2ac601691280ecfcfddd9b9b3c36defed52d81db))
+* runtime and client fixes from the production review ([#29](https://github.com/chenhunghan/bend-kube/issues/29)) ([a78f2af](https://github.com/chenhunghan/bend-kube/commit/a78f2afe0fea6a222cd720ebf7e0bcdc683ba0ac))
+
 ## [0.8.0](https://github.com/chenhunghan/bend-kube/compare/v0.7.0...v0.8.0) (2026-11-10)
 
 
