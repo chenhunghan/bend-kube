@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/chenhunghan/bend-kube/compare/v0.7.0...v0.8.0) (2026-11-10)
+
+
+### Features
+
+* admission and conversion webhooks over a TLS server ([#25](https://github.com/chenhunghan/bend-kube/issues/25)) ([fede360](https://github.com/chenhunghan/bend-kube/commit/fede360156df9b339417612c74bfef6266bada51))
+
 ## [0.7.0](https://github.com/chenhunghan/bend-kube/compare/v0.6.0...v0.7.0) (2026-11-10)
 
 
