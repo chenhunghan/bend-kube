@@ -6,7 +6,9 @@
 // the real time, and hear SIGTERM to hand its Lease back before the pod
 // dies.
 
+#include <netinet/in.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 
 // Sys.wall(): (days since 1970-01-01, (second of the day, microseconds)),
@@ -54,6 +56,58 @@ Term sys_signal_run(Env e, Term* f, IoWork* w) {
   }
   return sys_signal_more(e, w);
 }
+
+// Sys.listen.dual(port): a non-blocking listener on every address of port:
+// IPv6 and, through IPv4-mapped addresses, IPv4 (IPV6_V6ONLY off), so an
+// IPv6-only or dual-stack pod is reachable; a host without IPv6 gets one
+// on 0.0.0.0. Base's TCP.accept serves it like TCP.listen's.
+Term sys_listen_run(Env e, Term* f, IoWork* w) {
+  uint16_t port = (uint16_t)(u32)f[0];
+  int one = 1, zero = 0, ok = 0;
+  int fd = socket(AF_INET6, SOCK_STREAM, 0);
+  if (fd >= 0) {
+    struct sockaddr_in6 at;
+    memset(&at, 0, sizeof at);
+    at.sin6_family = AF_INET6;
+    at.sin6_port = htons(port);
+    at.sin6_addr = in6addr_any;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);
+    ok = bind(fd, (struct sockaddr*)&at, sizeof at) == 0;
+    if (!ok) {
+      close(fd);
+    }
+  }
+  if (!ok) {
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+      return io_fail(e, (uint32_t)errno, NULL);
+    }
+    struct sockaddr_in at4;
+    memset(&at4, 0, sizeof at4);
+    at4.sin_family = AF_INET;
+    at4.sin_port = htons(port);
+    at4.sin_addr.s_addr = htonl(INADDR_ANY);
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (bind(fd, (struct sockaddr*)&at4, sizeof at4) != 0) {
+      uint32_t code = (uint32_t)errno;
+      close(fd);
+      return io_fail(e, code, NULL);
+    }
+  }
+  if (listen(fd, 512) < 0 || fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0) {
+    uint32_t code = (uint32_t)errno;
+    close(fd);
+    return io_fail(e, code, NULL);
+  }
+  return io_done(e, io_hand(fd));
+}
+
+#ifdef CID(Sys.listen.dual)
+static void __attribute__((constructor)) sys_listen_use(void) {
+  io_eff(CID(Sys.listen.dual), sys_listen_run);
+}
+#endif
 
 #ifdef CID(Sys.wall)
 static void __attribute__((constructor)) sys_wall_use(void) {

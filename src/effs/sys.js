@@ -12,3 +12,7 @@ io_eff(CID(Sys.signal), (k) => {
   io_park_on(undefined, false, k, () => undefined, Infinity);
   return undefined;
 });
+
+// The JS lane listens through Base's IPv4 TCP.listen: sys.bend falls back
+// to it on this answer, by its text (Sys.listen.js).
+io_eff(CID(Sys.listen.dual), (port) => io_fail(4000, "dual-stack listen needs the native lane"));

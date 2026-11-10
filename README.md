@@ -419,7 +419,11 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
 
 - The server is always verified against the given CA, or the system roots
   if none is given, and by name (or by IP for an IP literal), with TLS 1.2
-  as the minimum.
+  as the minimum. Only the certificate's SANs name the server, never its CN
+  (as in Go), and an empty name is refused rather than left unchecked.
+- A kubeconfig `*-data` field that is not base64 fails the connection
+  (as client-go refuses the kubeconfig). Before 0.9 it meant "none", which
+  for `certificate-authority-data` trusted the system roots.
 - `tls-server-name` (client-go's `TLSClientConfig.ServerName`) is honored:
   the client connects to the server's host and verifies the certificate
   against that name, which it also sends as SNI. This is how a client
@@ -443,6 +447,10 @@ keep-alive HTTP/1.1 connections, as kube-rs's hyper client pools them.
   `Tls.secure`, `Tls.send`, `Tls.send_bytes`, `Tls.recv`, `Tls.close`); see the trust
   boundary under Scope.
 - Names resolve through DNS, and IPv6 is supported.
+- The health server and the webhook server listen dual-stack (`::` with
+  IPv4 mapped in, `Y.Sys.listen`), so they answer on IPv6-only and
+  dual-stack clusters; IPv4 only on a host without IPv6, and on the JS
+  lane.
 - SIGPIPE is ignored, so a dead peer shows up as an error instead of
   killing the process.
 
@@ -512,9 +520,22 @@ admission only.
 - `cert` and `key` are PEM file paths (a mounted Secret, such as
   cert-manager's `tls.crt` and `tls.key`). They are read for every
   connection, so a rotated certificate is served without a restart.
-- Each connection reads at most 16 MiB, waits at most 10s for each read,
-  and gets one answer. An optimized build answers a pod-sized review in
+- Limits: at most 256 connections at once (more are closed as they
+  arrive), 8 MiB per request (a larger Content-Length is refused with 413
+  before its body is read), 10s for any one read, and 30s for a whole
+  connection from its accept. A peer that stops sending mid-request is
+  closed. When `accept` fails (out of descriptors), the server pauses 200
+  ms rather than spin. An optimized build answers a pod-sized review in
   about 3 ms and a 2 MB one in about 1.2s.
+- The TLS context is built once per certificate and key and rebuilt when
+  the PEM text changes, so a handshake costs no PEM parsing. Renegotiation
+  is off.
+- `admit` has no deadline of its own: the API server gives up after the
+  webhook's `timeoutSeconds` (at most 30), but a hung `admit` holds its
+  connection slot. Keep it short, and give it its own timeout if it calls
+  out.
+- Put the webhook behind a NetworkPolicy that admits only the API server:
+  it asks clients for no certificate.
   Webhooks answer on every replica: start the server with `IO.spawn` before
   `Kube.control`, not under leader election.
 - The server side of TLS (`Tls.accept`) runs on the native lane only.
@@ -527,7 +548,7 @@ loop.
 
 ## Laws
 
-`LAWS.bend` holds 78 laws, proven in `PROOF.bend` and accepted by both
+`LAWS.bend` holds 79 laws, proven in `PROOF.bend` and accepted by both
 `bend PROOF.bend` and `--verdict`, the Lean-proven kernel:
 
 - **Watcher:**
@@ -584,7 +605,9 @@ loop.
   - a denial without a code answers 403 with its message, for the request's
     uid, in the review's apiVersion;
   - an allowed request without a patch carries no patch and no status;
-  - a request without Content-Length or chunked framing has no body.
+  - a request without Content-Length or chunked framing has no body;
+  - a request whose Content-Length is past the cap is refused before its
+    body.
 - **Leader election:**
   - another holder's Lease seen changing within its duration is live;
   - our clock stepping back doesn't expire it;

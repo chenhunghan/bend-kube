@@ -252,6 +252,23 @@ def map_pending(+c: R.CCtx) -> String:
 def map_report(+c: R.CCtx) -> String:
   "mapped relation: " ++ map_line(c) ++ "; objects for the mapper: " ++ map_pending(c)
 
+def ca_of(r: Result<&2, &2, String, K.Config>) -> String:
+  match r:
+    case Done{K.Config{h, p, b, ca, cert, key, tok, ns, pl, lm, sn, fc}}:
+      K.Src.ident(ca)
+    case Fail{e}:
+      "fail: " ++ e
+
+def js.of(r: Result<&2, &2, String, J.Json>) -> J.Json:
+  match r:
+    case Done{j}:
+      j
+    case Fail{e}:
+      J.JStr{"bad json: " ++ e}
+
+def kc(+ca: String) -> J.Json:
+  js.of(J.Json.parse("{\"current-context\": \"c\", \"contexts\": [{\"name\": \"c\", \"context\": {\"cluster\": \"k\", \"user\": \"u\"}}], \"clusters\": [{\"name\": \"k\", \"cluster\": {\"server\": \"https://h:6443\"" ++ ca ++ "}}], \"users\": [{\"name\": \"u\", \"user\": {}}]}"))
+
 def main() -> IO(Unit):
   # One slot. Three keys are queued; the first two are gone from the cache
   # (their objects deleted), the third is live: dispatch must reach it.
@@ -310,3 +327,5 @@ def main() -> IO(Unit):
     sch : Chan(R.SMsg) <- Chan.new(R.SMsg, 1)
     mtr : Chan(X.Meter) <- Chan.new(X.Meter, 1)
     IO.print(map_report(R.CCtx{kcfg("main"), mspec(), mch, sch, 0, mtr, None{}}))
+    IO.print("kubeconfig CA: bad base64 " ++ ca_of(K.Kube.config(kc(", \"certificate-authority-data\": \"%%%\""), ""))
+      ++ "; good " ++ ca_of(K.Kube.config(kc(", \"certificate-authority-data\": \"cGVt\""), "")) ++ "; none " ++ ca_of(K.Kube.config(kc(""), "")))

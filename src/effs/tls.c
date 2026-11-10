@@ -41,6 +41,7 @@ typedef struct {
   int           (*ctx_use_key)(void*, void*);
   int           (*ctx_check_key)(void*);
   int           (*ctx_alpn)(void*, const unsigned char*, unsigned);
+  uint64_t      (*ctx_options)(void*, uint64_t);
   void*         (*ssl_new)(void*);
   void          (*ssl_free)(void*);
   int           (*ssl_set_fd)(void*, int);
@@ -48,6 +49,7 @@ typedef struct {
   int           (*ssl_set1_host)(void*, const char*);
   void*         (*ssl_param)(void*);
   int           (*param_ip)(void*, const char*);
+  void          (*param_hostflags)(void*, unsigned int);
   int           (*ssl_connect)(void*);
   int           (*ssl_accept)(void*);
   int           (*ssl_read)(void*, void*, int);
@@ -84,6 +86,8 @@ static void*           tls_conn[65536];  // an SSL*, TLS_PLAIN, or NULL
 #define TLS_WANT_READ          2
 #define TLS_WANT_WRITE         3
 #define TLS_ZERO_RETURN        6
+#define TLS_OP_NO_RENEGOTIATION 0x40000000U
+#define TLS_NEVER_CHECK_SUBJECT 0x20
 
 static void* tls_open_lib(const char* env, const char* const* names) {
   const char* own = getenv(env);
@@ -136,6 +140,7 @@ static int tls_load_now(void) {
   TLS_SYM(s, ctx_use_key, "SSL_CTX_use_PrivateKey");
   TLS_SYM(s, ctx_check_key, "SSL_CTX_check_private_key");
   TLS_SYM(s, ctx_alpn, "SSL_CTX_set_alpn_protos");
+  TLS_SYM(s, ctx_options, "SSL_CTX_set_options");
   TLS_SYM(s, ssl_new, "SSL_new");
   TLS_SYM(s, ssl_free, "SSL_free");
   TLS_SYM(s, ssl_set_fd, "SSL_set_fd");
@@ -151,6 +156,7 @@ static int tls_load_now(void) {
   TLS_SYM(s, ssl_pending, "SSL_pending");
   TLS_SYM(s, ssl_verify_result, "SSL_get_verify_result");
   TLS_SYM(c, param_ip, "X509_VERIFY_PARAM_set1_ip_asc");
+  TLS_SYM(c, param_hostflags, "X509_VERIFY_PARAM_set_hostflags");
   TLS_SYM(c, verify_text, "X509_verify_cert_error_string");
   TLS_SYM(c, store_add, "X509_STORE_add_cert");
   TLS_SYM(c, bio_mem, "BIO_new_mem_buf");
@@ -440,11 +446,21 @@ Term tls_secure_run(Env e, Term* f, IoWork* w) {
     return tls_secure_fail(e, w);
   }
   tls_lib.ssl_set_fd(o->ssl, fd);
-  if (tls_is_ip(o->host)) {
-    tls_lib.param_ip(tls_lib.ssl_param(o->ssl), o->host);
-  } else {
+  // The server is checked by this name, always: an empty one, or a setter
+  // that fails, would turn the check off, so either refuses the connection.
+  // A certificate's CN is never taken for a name (as in Go): only its SANs.
+  void* param = tls_lib.ssl_param(o->ssl);
+  tls_lib.param_hostflags(param, TLS_NEVER_CHECK_SUBJECT);
+  int named = *o->host != 0;
+  if (named && tls_is_ip(o->host)) {
+    named = tls_lib.param_ip(param, o->host) == 1;
+  } else if (named) {
     tls_lib.ssl_ctrl(o->ssl, TLS_CTRL_SNI, 0, o->host);
-    tls_lib.ssl_set1_host(o->ssl, o->host);
+    named = tls_lib.ssl_set1_host(o->ssl, o->host) == 1;
+  }
+  if (!named) {
+    tls_fail(o, EINVAL, "TLS: no server name to verify");
+    return tls_secure_fail(e, w);
   }
   return tls_secure_more(e, w);
 }
@@ -473,6 +489,39 @@ static Term tls_accept_more(Env e, IoWork* w) {
     tls_fail(o, ECONNRESET, "TLS: handshake failed");
   }
   return tls_secure_fail(e, w);
+}
+
+// The server's context, built once per certificate and key: a handshake
+// reuses it while the PEM text it was built from is unchanged, and the
+// first after a rotation builds a new one (an SSL keeps its own reference
+// to the context it began with). Every SSL call runs on the loop thread.
+static void* tls_srv_ctx;
+static char* tls_srv_cert;
+static char* tls_srv_key;
+
+static void* tls_server_ctx(TlsOpen* o) {
+  if (tls_srv_ctx != NULL && strcmp(tls_srv_cert, o->cert) == 0 && strcmp(tls_srv_key, o->key) == 0) {
+    return tls_srv_ctx;
+  }
+  void* ctx = tls_lib.ctx_new(tls_lib.server_method());
+  if (ctx == NULL) {
+    return NULL;
+  }
+  tls_lib.ctx_ctrl(ctx, TLS_CTRL_MIN_PROTO, TLS_1_2, NULL);
+  tls_lib.ctx_options(ctx, TLS_OP_NO_RENEGOTIATION);
+  if (*o->cert == 0 || !tls_use_client(o, ctx)) {
+    tls_lib.ctx_free(ctx);
+    return NULL;
+  }
+  if (tls_srv_ctx != NULL) {
+    tls_lib.ctx_free(tls_srv_ctx);
+    free(tls_srv_cert);
+    free(tls_srv_key);
+  }
+  tls_srv_ctx = ctx;
+  tls_srv_cert = strdup(o->cert);
+  tls_srv_key = strdup(o->key);
+  return ctx;
 }
 
 // Tls.accept(sock, cert_pem, key_pem, ms): the server side of a handshake
@@ -506,19 +555,12 @@ Term tls_accept_run(Env e, Term* f, IoWork* w) {
     snprintf(o->text, sizeof o->text, "%s", tls_why);
     return tls_secure_fail(e, w);
   }
-  void* ctx = tls_lib.ctx_new(tls_lib.server_method());
+  void* ctx = tls_server_ctx(o);
   if (ctx == NULL) {
-    tls_fail(o, ENOMEM, "TLS: SSL_CTX_new");
-    return tls_secure_fail(e, w);
-  }
-  tls_lib.ctx_ctrl(ctx, TLS_CTRL_MIN_PROTO, TLS_1_2, NULL);
-  if (*o->cert == 0 || !tls_use_client(o, ctx)) {
     tls_fail(o, EINVAL, "TLS: bad server certificate or key");
-    tls_lib.ctx_free(ctx);
     return tls_secure_fail(e, w);
   }
   o->ssl = tls_lib.ssl_new(ctx);
-  tls_lib.ctx_free(ctx);
   if (o->ssl == NULL) {
     tls_fail(o, ENOMEM, "TLS: SSL_new");
     return tls_secure_fail(e, w);

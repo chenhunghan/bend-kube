@@ -14,12 +14,15 @@ import ./base64.bend as B
 # CachedFileTokenSource).
 
 # A secret's source: inline text, a file to read, a credential plugin to
-# run (client-go's exec ExecCredential: its status.token), or nothing.
+# run (client-go's exec ExecCredential: its status.token), nothing, or a
+# field that cannot be read (bad base64), which fails when it is loaded
+# rather than quietly meaning "none" (for a CA, the system's roots).
 type Src is Data:
   Inline{text: String}
   FromFile{path: String}
   FromExec{cmd: String, args: List<&2, String>}
   NoSrc{}
+  BadSrc{msg: String}
 
 # pool: idle keep-alive connections to reuse (client.bend), when the
 # program made one (Config.with_pool); None opens one per request.
@@ -156,17 +159,17 @@ def Kube.named(xs: List<&2, J.Json>, +name: String, +field: String) -> J.Json:
       Kube.named.if(x, field, Kube.named(t, name, field),
         String.eq(J.Json.str_or(J.Json.get(x, "name"), ""), name))
 
-def Kube.src.b64(bs: Maybe<&2, List<&2, U32>>) -> Src:
+def Kube.src.b64(bs: Maybe<&2, List<&2, U32>>, +field: String) -> Src:
   match bs:
     case Some{b}:
       Inline{U.Utf8.decode_all(b)}
     case None{}:
-      NoSrc{}
+      BadSrc{"kubeconfig: " ++ field ++ " is not base64"}
 
-def Kube.src.go(data: J.Json, path: J.Json) -> Src:
+def Kube.src.go(data: J.Json, path: J.Json, +field: String) -> Src:
   match data path:
     case J.JStr{d} _:
-      Kube.src.b64(B.B64.decode(d))
+      Kube.src.b64(B.B64.decode(d), field)
     case _ J.JStr{p}:
       FromFile{p}
     case _ _:
@@ -174,7 +177,7 @@ def Kube.src.go(data: J.Json, path: J.Json) -> Src:
 
 # A secret from "<name>-data" (base64, inline) or "<name>" (a path).
 def Kube.src(+o: J.Json, +name: String) -> Src:
-  Kube.src.go(J.Json.get(o, name ++ "-data"), J.Json.get(o, name))
+  Kube.src.go(J.Json.get(o, name ++ "-data"), J.Json.get(o, name), name ++ "-data")
 
 def Kube.strs(xs: List<&2, J.Json>) -> List<&2, String>:
   match xs:
@@ -445,6 +448,8 @@ def Src.ident(s: Src) -> String:
       "x:" ++ String.join(c <> a, " ")
     case NoSrc{}:
       "-"
+    case BadSrc{m}:
+      "!" ++ m
 
 # Which cluster, as whom: the server and the credentials, so two configs
 # share a watch only when they would see the same objects. Never logged

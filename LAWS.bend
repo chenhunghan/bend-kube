@@ -713,3 +713,9 @@ law admission_allow_is_bare:
 law request_without_length_is_done:
   {A.Rq.done(A.Rq.feed(A.Rq.init(), U.Utf8.encode("GET /x HTTP/1.1\r\nHost: h\r\n\r\n"))) == True{} : Bool}
 
+# A request whose Content-Length is past the cap is refused before any of
+# its body is read.
+law request_declared_over_cap_refused:
+  {A.Rq.too_big(A.Rq.feed(A.Rq.init(), U.Utf8.encode("POST / HTTP/1.1\r\nContent-Length: 99999999\r\n\r\n")),
+    A.Rq.max_bytes()) == True{} : Bool}
+

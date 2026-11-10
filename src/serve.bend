@@ -2,6 +2,7 @@ import Base
 import ./runtime.bend as R
 import ./control.bend as X
 import ./utf8.bend as U
+import ./sys.bend as Y
 
 # Serve
 # =====
@@ -309,6 +310,6 @@ def Serve.listening(r: Serve.Res(Listener), +status: Chan(R.SMsg), +meter: Chan(
       # port that cannot be bound is fatal (as in controller-runtime)
       IO.die(Unit, 1, "bend-kube: health server cannot listen: " ++ m)
 
-# Serves the endpoints on 0.0.0.0:port.
+# Serves the endpoints on port, on IPv6 and IPv4 (Y.Sys.listen).
 def Serve.run(+port: U32, +status: Chan(R.SMsg), +meter: Chan(X.Meter)) -> IO(Unit):
-  IO.bind(Serve.Res(Listener), Unit, TCP.listen("0.0.0.0", port), r => Serve.listening(r, status, meter))
+  IO.bind(Serve.Res(Listener), Unit, Y.Sys.listen(port), r => Serve.listening(r, status, meter))

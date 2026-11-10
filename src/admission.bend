@@ -110,6 +110,23 @@ def Rq.feed(st: Rq, +bs: List<&2, U32>) -> Rq:
     case RBody{l, r, n}:
       RBody{l, H.Http.feed(bs, r), (n + U32.from_nat(List.length(&2, U32, bs)) : U32)}
 
+# The most a request may carry, 8 MiB: the API server sends at most about
+# 3 MiB of object (twice that with oldObject on an update), and every byte
+# held costs Bend a list cell.
+def Rq.max_bytes() -> U32:
+  8388608
+
+# Whether a request is past max bytes: read already, or declared by its
+# Content-Length before the body is read.
+def Rq.too_big(st: Rq, +max: U32) -> Bool:
+  match st:
+    case RBody{l, H.Resp{H.PLen{left}, h, o}, n}:
+      Bool.or(U32.is_gt(n, max), U32.is_gt(left, max))
+    case RBody{l, r, n}:
+      U32.is_gt(n, max)
+    case RLine{a, n}:
+      U32.is_gt(n, max)
+
 def Rq.size(st: Rq) -> U32:
   match st:
     case RLine{a, n}:
