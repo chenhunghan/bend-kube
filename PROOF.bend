@@ -278,3 +278,6 @@ def Laws.request_without_length_is_done():
 
 def Laws.request_declared_over_cap_refused():
   {==}
+
+def Laws.watch_stops_at_a_bad_line(rv, f, first, m, o):
+  {==}

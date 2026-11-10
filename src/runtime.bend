@@ -129,7 +129,7 @@ def Drv.inputs.par(+depth: Nat, +ls: List<&2, List<&2, U32>>) -> List<&2, W.Inpu
 
 # After a recv: the stream's state, and the step its whole lines make.
 type Dig is Data:
-  Dig{step: W.Step, resp: H.Resp, carry: List<&2, U32>, more: Bool}
+  Dig{step: W.Step, resp: H.Resp, carry: List<&2, U32>, more: Bool, why: String}
 
 def Drv.status(r: H.Resp) -> U32:
   match r:
@@ -166,11 +166,11 @@ def Drv.digest.end.go(st: W.WState, outs: List<&2, W.Out>, +wait: Bool, +r: H.Re
     case True{} True{}:
       # already backing off (an error event came first): the end changes
       # nothing, so the failure count and the backoff stand
-      Dig{W.Step{st, outs, True{}}, r, carry, False{}}
+      Dig{W.Step{st, outs, True{}}, r, carry, False{}, ""}
     case False{} True{}:
-      Dig{W.Watcher.merge(W.Step{st, outs, False{}}, Drv.end_input(r)), r, carry, False{}}
+      Dig{W.Watcher.merge(W.Step{st, outs, False{}}, Drv.end_input(r)), r, carry, False{}, ""}
     case w False{}:
-      Dig{W.Step{st, outs, w}, r, carry, Bool.not(w)}
+      Dig{W.Step{st, outs, w}, r, carry, Bool.not(w), ""}
 
 # A stream that ended cleanly is a watch timeout: the watcher resumes.
 def Drv.digest.end(s: W.Step, r: H.Resp, carry: List<&2, U32>, +end: Bool) -> Dig:
@@ -191,13 +191,21 @@ def Drv.digest.lines(st: W.WState, rb: H.Resp & List<&2, U32>, carry: List<&2, U
     case (+r, body):
       Drv.digest.fin(st, r, H.Lines.split(carry, body), Bool.or(eof, Drv.ended(r)))
 
-def Drv.digest.ok(st: W.WState, r: H.Resp, carry: List<&2, U32>, +eof: Bool, +code: U32,
+# What the server said when it refused a watch: its status and reason.
+def Drv.refused(r: H.Resp) -> String:
+  match r:
+    case H.Resp{p, Some{H.Head{c, reason, hs}}, o}:
+      U32.show(c) ++ " " ++ reason
+    case _:
+      "no status"
+
+def Drv.digest.ok(st: W.WState, +r: H.Resp, carry: List<&2, U32>, +eof: Bool, +code: U32,
   ok: Bool) -> Dig:
   match ok:
     case True{}:
       Drv.digest.lines(st, H.Http.take(r), carry, eof)
     case False{}:
-      Dig{W.Watcher.step(st, W.IWatchErr{code}), H.Http.resp.init(), Nil{}, False{}}
+      Dig{W.Watcher.step(st, W.IWatchErr{code}), H.Http.resp.init(), Nil{}, False{}, Drv.refused(r)}
 
 def Drv.digest.go(st: W.WState, r: H.Resp, carry: List<&2, U32>, +eof: Bool, +code: U32) -> Dig:
   Drv.digest.ok(st, r, carry, eof, code, U32.is_eq(code, 200))
@@ -338,8 +346,14 @@ def Drv.run(outer: Nat, fuel: Nat, ev: DEv, +st: W.WState, +resp: H.Resp, +carry
     case o 1n+f DRecv{s, Done{+bs}}:
       Drv.run(o, f, DDig{s, Drv.digest(st, H.Http.feed(bs, resp), carry,
         List.is_empty(&2, U32, bs))}, st, resp, carry, ctx)
-    case o 1n+f DDig{s, Dig{step, r2, c2, more}}:
+    case o 1n+f DDig{s, Dig{step, r2, c2, more, ""}}:
       Drv.run(o, f, DStepped{step, Some{s}, more}, st, r2, c2, ctx)
+    case o 1n+f DDig{s, Dig{step, r2, c2, more, why}}:
+      # the server answered the watch with an error status (403 Forbidden
+      # from missing RBAC, 404 for a missing CRD): say so, then back off
+      IO.bind(Unit, Unit, L.Log.warn("watch refused",
+        [L.Log.kv("path", WCtx.path(ctx)), L.Log.kv("server", WCtx.server(ctx)), L.Log.kv("status", why)]),
+        u => Drv.run(o, f, DStepped{step, Some{s}, more}, st, r2, c2, ctx))
     case o 1n+f DRecv{s, Fail{e}}:
       IO.bind(Unit, Unit, L.Log.warn("watch read failed",
         [L.Log.kv("path", WCtx.path(ctx)), L.Log.kv("server", WCtx.server(ctx)), L.Log.kv("error", Drv.why(e))]),
@@ -762,8 +776,10 @@ def Ctl.dispatch.loop(fuel: Nat, +s: S.Store, d: Disp) -> Disp:
   match fuel d:
     case 0n x:
       x
-    case 1n+f Disp{q, jobs, True{}}:
-      Ctl.dispatch.loop(f, s, Ctl.dispatch.pop(Q.Queue.pop_all(64n, q, Nil{}), s, jobs))
+    case 1n+f Disp{+q, jobs, True{}}:
+      # every waiting key may start, up to the free slots (Queue.pop stops
+      # at the limit): a pass is not capped below max
+      Ctl.dispatch.loop(f, s, Ctl.dispatch.pop(Q.Queue.pop_all(1n+U32.to_nat(Q.Queue.depth(q)), q, Nil{}), s, jobs))
     case 1n+f x:
       x
 
@@ -927,10 +943,22 @@ def Ctl.at_idle(+st: CState, +ctx: CCtx, i: Idle) -> IO(CState):
 
 # Up to 10% more for a delay of a second or more, so requeues armed
 # together (a relist, a restart) spread out.
+def Ctl.jitter.sat(+ms: U32, +j: U32, over: Bool) -> U32:
+  match over:
+    case True{}:
+      4294967295
+    case False{}:
+      (ms + j : U32)
+
+def Ctl.jitter.at(+ms: U32, +j: U32) -> U32:
+  Ctl.jitter.sat(ms, j, U32.is_gt(ms, (4294967295 - j : U32)))
+
+# ms with up to 10% more, saturating rather than wrapping: a requeue near
+# 2^32 ms stays the longest wait, not a random short one.
 def Ctl.jitter(+ms: U32, r: Result<&1, &1, U32 & String, U32>) -> U32:
   match r:
     case Done{x}:
-      (ms + (x % (ms / 10 + 1)) : U32)
+      Ctl.jitter.at(ms, (x % (ms / 10 + 1) : U32))
     case Fail{e}:
       ms
 

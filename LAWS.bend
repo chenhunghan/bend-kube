@@ -719,3 +719,15 @@ law request_declared_over_cap_refused:
   {A.Rq.too_big(A.Rq.feed(A.Rq.init(), U.Utf8.encode("POST / HTTP/1.1\r\nContent-Length: 99999999\r\n\r\n")),
     A.Rq.max_bytes()) == True{} : Bool}
 
+# Once a step of a batch asks to back off (here a line that does not
+# parse), the rest of the batch is not applied: the driver reconnects from
+# the version before it, so no event is skipped past a gap.
+law watch_stops_at_a_bad_line:
+  for rv: String
+  for f: U32
+  for first: Bool
+  for m: String
+  for o: J.Json
+  {W.Watcher.steps([W.IEvent{C.WBad{m}}, W.IEvent{C.WModified{o}}], W.Step{W.WState{W.WWatch{rv}, f, first}, Nil{}, False{}})
+    == W.Watcher.steps([W.IEvent{C.WBad{m}}], W.Step{W.WState{W.WWatch{rv}, f, first}, Nil{}, False{}}) : W.Step}
+

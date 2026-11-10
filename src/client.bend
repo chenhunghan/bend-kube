@@ -8,6 +8,8 @@ import ./net.bend as N
 import ./yaml.bend as Y
 import ./queue.bend as Q
 import ./lease.bend as E
+import ./sys.bend as Sy
+import ./time.bend as T
 
 # Client
 # ======
@@ -168,31 +170,84 @@ def Strs.own(xs: List<&2, String>) -> List<String>:
     case Con{x, t}:
       x <> Strs.own(t)
 
-def Exec.token.got(+cmd: String, t: J.Json) -> Res(String):
-  match t:
-    case J.JStr{tok}:
-      Done{tok}
-    case _:
+# A plugin's token and when it expires (seconds since 1970), if it said.
+type ExecTok is Data:
+  ExecTok{token: String, exp: Maybe<&2, U32>}
+
+def Exec.token.got(+cmd: String, t: J.Json, exp: J.Json) -> Res(ExecTok):
+  match t exp:
+    case J.JStr{tok} J.JStr{+x}:
+      Done{ExecTok{tok, T.Time.parse(x)}}
+    case J.JStr{tok} _:
+      Done{ExecTok{tok, None{}}}
+    case _ _:
       Fail{(5, cmd ++ ": the ExecCredential has no status.token")}
 
-def Exec.token.json(+cmd: String, j: Result<&2, &2, String, J.Json>) -> Res(String):
+def Exec.token.json(+cmd: String, j: Result<&2, &2, String, J.Json>) -> Res(ExecTok):
   match j:
     case Done{+c}:
-      Exec.token.got(cmd, J.Json.at(c, ["status", "token"]))
+      Exec.token.got(cmd, J.Json.at(c, ["status", "token"]), J.Json.at(c, ["status", "expirationTimestamp"]))
     case Fail{e}:
       Fail{(5, cmd ++ ": bad ExecCredential: " ++ e)}
 
 # A credential plugin's answer (client-go's exec ExecCredential): its
-# status.token. The plugin runs on every connection, so it may cache and
-# refresh tokens as it sees fit.
-def Exec.token(+cmd: String, r: Res(U32 & (String & String))) -> IO(Res(String)):
+# status.token and status.expirationTimestamp.
+def Exec.token(+cmd: String, r: Res(U32 & (String & String))) -> Res(ExecTok):
   match r:
     case Done{(0, (out, err))}:
-      IO.pure(Res(String), Exec.token.json(cmd, J.Json.parse(out)))
+      Exec.token.json(cmd, J.Json.parse(out))
     case Done{(code, (out, err))}:
-      IO.pure(Res(String), Fail{(5, cmd ++ " failed: " ++ String.trim(err))})
+      Fail{(5, cmd ++ " failed: " ++ String.trim(err))}
     case Fail{(c, m)}:
-      IO.pure(Res(String), Fail{(c, cmd ++ ": " ++ m)})
+      Fail{(c, cmd ++ ": " ++ m)}
+
+# How long a token is used: until a minute before it expires, or for a
+# minute when the plugin gave no expiry (client-go keeps such a token until
+# a 401; this one asks again each minute instead).
+def Exec.until.go(+now: U32, +exp: U32, late: Bool) -> U32:
+  match late:
+    case True{}:
+      now
+    case False{}:
+      (exp - 60 : U32)
+
+def Exec.until(+now: U32, exp: Maybe<&2, U32>) -> U32:
+  match exp:
+    case Some{+x}:
+      Exec.until.go(now, x, U32.is_le(x, (now + 60 : U32)))
+    case None{}:
+      (now + 60 : U32)
+
+def Exec.kept(+key: String, +now: U32, r: Res(ExecTok)) -> IO(Res(String)):
+  match r:
+    case Done{ExecTok{+t, exp}}:
+      IO.bind(Unit, Res(String), Sy.Sys.memo_put(key, t, Exec.until(now, exp)), u => IO.pure(Res(String), Done{t}))
+    case Fail{e}:
+      IO.pure(Res(String), Fail{e})
+
+def Exec.ran(+cmd: String, +key: String, +now: U32, r: Res(U32 & (String & String))) -> IO(Res(String)):
+  Exec.kept(key, now, Exec.token(cmd, r))
+
+def Exec.cached(+cmd: String, args: List<&2, String>, +key: String, +now: U32, +hit: String, miss: Bool) ->
+  IO(Res(String)):
+  match miss:
+    case False{}:
+      IO.pure(Res(String), Done{hit})
+    case True{}:
+      IO.bind(Res(U32 & (String & String)), Res(String),
+        Process.run(cmd, Strs.own(args), "", 1048576, 30000), r => Exec.ran(cmd, key, now, r))
+
+def Exec.key(+cmd: String, args: List<&2, String>) -> String:
+  "exec\0" ++ cmd ++ "\0" ++ String.join(args, "\0")
+
+def Exec.at(+cmd: String, +args: List<&2, String>, +now: U32) -> IO(Res(String)):
+  IO.bind(String, Res(String), Sy.Sys.memo_get(Exec.key(cmd, args), now),
+    +hit => Exec.cached(cmd, args, Exec.key(cmd, args), now, hit, String.is_empty(hit)))
+
+# A plugin's token, from the process-wide cache while it is good: the
+# plugin runs once per token, not once per request.
+def Exec.load(+cmd: String, +args: List<&2, String>) -> IO(Res(String)):
+  IO.bind(U32 & (U32 & U32), Res(String), Sy.Sys.wall(), w => Exec.at(cmd, args, T.Wall.secs(T.Wall.of(w))))
 
 def Src.load(s: K.Src) -> IO(Res(String)):
   match s:
@@ -200,9 +255,8 @@ def Src.load(s: K.Src) -> IO(Res(String)):
       IO.pure(Res(String), Done{t})
     case K.FromFile{+p}:
       IO.bind(Res(String), Res(String), Fs.read(p), r => Src.load.fin(p, r))
-    case K.FromExec{+cmd, args}:
-      IO.bind(Res(U32 & (String & String)), Res(String),
-        Process.run(cmd, Strs.own(args), "", 1048576, 30000), r => Exec.token(cmd, r))
+    case K.FromExec{+cmd, +args}:
+      Exec.load(cmd, args)
     case K.NoSrc{}:
       IO.pure(Res(String), Done{""})
     case K.BadSrc{m}:
@@ -519,8 +573,6 @@ def Req.idempotent.go(m: String) -> Bool:
     case "GET":
       True{}
     case "HEAD":
-      True{}
-    case "PUT":
       True{}
     case _:
       # DELETE is not replayed: if the first one landed and the name was

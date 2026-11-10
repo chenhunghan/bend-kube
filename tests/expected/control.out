@@ -33,3 +33,4 @@ host watch: fenced; without election: unfenced
 ctx cluster 1: host; ctx cluster 9: virtual
 watch 1 filtered: 1
 timeouts: unset takes 30000: 30000; own 500 wins: 500; none: 0
+PAnnotations, a kubectl re-apply that changes nothing else: keys: -; gone: -; a changed annotation: keys: web/k; gone: -

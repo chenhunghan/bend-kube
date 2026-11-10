@@ -16,3 +16,14 @@ io_eff(CID(Sys.signal), (k) => {
 // The JS lane listens through Base's IPv4 TCP.listen: sys.bend falls back
 // to it on this answer, by its text (Sys.listen.js).
 io_eff(CID(Sys.listen.dual), (port) => io_fail(4000, "dual-stack listen needs the native lane"));
+
+// The memo table (sys.c): short strings that expire, in wall-clock seconds.
+const sys_memo = new Map();
+io_eff(CID(Sys.memo_get), (key, now) => {
+  const m = sys_memo.get(key);
+  return m !== undefined && Number(now) < m.until ? m.val : "";
+});
+io_eff(CID(Sys.memo_put), (key, val, until) => {
+  sys_memo.set(key, { val, until: Number(until) });
+  return { $: CID(Unit) };
+});

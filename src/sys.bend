@@ -3,8 +3,8 @@ import Base
 # Sys
 # ===
 #
-# Effects Base lacks (effs/sys.c): the wall clock, termination signals, and
-# a listener on IPv6 as well as IPv4.
+# Effects Base lacks (effs/sys.c): the wall clock, termination signals, a
+# listener on IPv6 as well as IPv4, and a small table of expiring strings.
 
 # The wall clock: (days since 1970-01-01, (second of the day,
 # microseconds)). time.bend's Wall.of makes it a Wall.
@@ -47,3 +47,14 @@ def Sys.listen.got(r: Result<&1, &1, U32 & String, Listener>, +port: U32) ->
 def Sys.listen(+port: U32) -> IO(Result<&1, &1, U32 & String, Listener>):
   IO.bind(Result<&1, &1, U32 & String, Listener>, Result<&1, &1, U32 & String, Listener>, Sys.listen.dual(port),
     r => Sys.listen.got(r, port))
+
+# A process-wide table of short strings that expire (wall-clock seconds,
+# as Wall.secs counts them): what must outlive one request, such as an
+# exec credential plugin's token. A missing or expired key answers "".
+def Sys.memo_get(key: String, now: U32) -> IO(String):
+  import "./effs/sys.c"
+  import "./effs/sys.js"
+
+def Sys.memo_put(key: String, value: String, until: U32) -> IO(Unit):
+  import "./effs/sys.c"
+  import "./effs/sys.js"
