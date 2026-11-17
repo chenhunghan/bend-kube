@@ -13,6 +13,7 @@ import ./src/control.bend as X
 import ./src/cond.bend as Co
 import ./src/config.bend as K
 import ./src/admission.bend as A
+import ./src/pb.bend as Pr
 
 # LAWS
 # ====
@@ -731,3 +732,89 @@ law watch_stops_at_a_bad_line:
   {W.Watcher.steps([W.IEvent{C.WBad{m}}, W.IEvent{C.WModified{o}}], W.Step{W.WState{W.WWatch{rv}, f, first}, Nil{}, False{}})
     == W.Watcher.steps([W.IEvent{C.WBad{m}}], W.Step{W.WState{W.WWatch{rv}, f, first}, Nil{}, False{}}) : W.Step}
 
+
+# Protobuf (the wire format, protobuf.dev/programming-guides/encoding)
+# --------------------------------------------------------------------
+
+# The spec's first example: field 1 holding 150 is 08 96 01.
+law pb_varint_150:
+  {Pr.Pb.encode(Pr.Pb.u32(1, 150)) == [8, 150, 1] : List<&2, U32>}
+
+# The spec's string: field 2 holding "testing" is 12 07, then the bytes.
+law pb_string_testing:
+  {Pr.Pb.encode(Pr.Pb.str(2, "testing")) == [18, 7, 116, 101, 115, 116, 105, 110, 103] : List<&2, U32>}
+
+# The spec's nested message: field 3 holding {1: 150} is 1a 03 08 96 01.
+law pb_nested_message:
+  {Pr.Pb.encode(Pr.Pb.msg(3, Pr.Pb.u32(1, 150))) == [26, 3, 8, 150, 1] : List<&2, U32>}
+
+# The spec's packed field: 4 holding [3, 270, 86942] is 22 06 03 8e 02 9e a7 05.
+law pb_packed_varints:
+  {Pr.Pb.encode(Pr.Pb.packed(4, [Pr.W64{0, 3}, Pr.W64{0, 270}, Pr.W64{0, 86942}]))
+    == [34, 6, 3, 142, 2, 158, 167, 5] : List<&2, U32>}
+
+# proto3 sends no field for a default value.
+law pb_defaults_omitted:
+  {Pr.Pb.encode(List.concat(&2, Pr.PbField, [Pr.Pb.u32(1, 0), Pr.Pb.str(2, ""), Pr.Pb.bool(3, False{})]))
+    == [] : List<&2, U32>}
+
+# The largest uint64 (and int64 -1) takes ten bytes, the last holding one bit.
+law pb_varint_max:
+  {Pr.Pb.varint(Pr.W64{4294967295, 4294967295}) == [255, 255, 255, 255, 255, 255, 255, 255, 255, 1] : List<&2, U32>}
+
+# An int32 of -1 is sign-extended: ten bytes, as for int64 -1.
+law pb_int32_negative:
+  {Pr.Pb.encode(Pr.Pb.u64(1, Pr.Pb.int32(4294967295)))
+    == [8, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1] : List<&2, U32>}
+
+# The spec's zigzag table: 0 -> 0, -1 -> 1, 1 -> 2, 2147483647 -> 4294967294,
+# -2147483648 -> 4294967295; and back.
+law pb_zigzag_table:
+  {[Pr.Pb.zigzag(Pr.W64{0, 0}), Pr.Pb.zigzag(Pr.W64{4294967295, 4294967295}), Pr.Pb.zigzag(Pr.W64{0, 1}),
+    Pr.Pb.zigzag(Pr.W64{0, 2147483647}), Pr.Pb.zigzag(Pr.W64{4294967295, 2147483648}),
+    Pr.Pb.unzigzag(Pr.W64{0, 4294967295}), Pr.Pb.unzigzag(Pr.W64{0, 2})]
+    == [Pr.W64{0, 0}, Pr.W64{0, 1}, Pr.W64{0, 2}, Pr.W64{0, 4294967294}, Pr.W64{0, 4294967295},
+      Pr.W64{4294967295, 2147483648}, Pr.W64{0, 1}] : List<&2, Pr.W64>}
+
+# fixed64 and fixed32 are little-endian.
+law pb_fixed_little_endian:
+  {Pr.Pb.encode([Pr.PbField{1, Pr.PF64{Pr.W64{16909060, 84281096}}}, Pr.PbField{2, Pr.PF32{16909060}}])
+    == [9, 8, 7, 6, 5, 4, 3, 2, 1, 21, 4, 3, 2, 1] : List<&2, U32>}
+
+# Decoding gives back each kind of field, unknown ones included, in order.
+law pb_decode_fields:
+  {Pr.Pb.decode([8, 150, 1, 9, 8, 7, 6, 5, 4, 3, 2, 1, 18, 2, 104, 105, 21, 4, 3, 2, 1, 160, 31, 0])
+    == Done{[Pr.PbField{1, Pr.PVar{Pr.W64{0, 150}}}, Pr.PbField{1, Pr.PF64{Pr.W64{16909060, 84281096}}},
+      Pr.PbField{2, Pr.PLen{[104, 105]}}, Pr.PbField{2, Pr.PF32{16909060}},
+      Pr.PbField{500, Pr.PVar{Pr.W64{0, 0}}}]} : Result<&2, &2, String, List<&2, Pr.PbField>>}
+
+# The largest uint64 decodes whole.
+law pb_decode_varint_max:
+  {Pr.Pb.decode([8, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1])
+    == Done{[Pr.PbField{1, Pr.PVar{Pr.W64{4294967295, 4294967295}}}]} : Result<&2, &2, String, List<&2, Pr.PbField>>}
+
+# A scalar that came twice reads as the last; an absent one as its default.
+law pb_last_value_wins:
+  {[Pr.Pb.get_u32([Pr.PbField{1, Pr.PVar{Pr.W64{0, 1}}}, Pr.PbField{1, Pr.PVar{Pr.W64{0, 2}}}], 1),
+    Pr.Pb.get_u32([Pr.PbField{1, Pr.PVar{Pr.W64{0, 1}}}], 2)] == [2, 0] : List<&2, U32>}
+
+# A repeated scalar reads the same packed or not.
+law pb_packed_or_not:
+  {Pr.Pb.all_u64([Pr.PbField{4, Pr.PLen{[3, 142, 2]}}, Pr.PbField{4, Pr.PVar{Pr.W64{0, 9}}}], 4)
+    == Done{[Pr.W64{0, 3}, Pr.W64{0, 270}, Pr.W64{0, 9}]} : Result<&2, &2, String, List<&2, Pr.W64>>}
+
+# A message that ends inside a field is refused.
+law pb_refuses_truncated:
+  {[Pr.Pb.decode([8]), Pr.Pb.decode([18, 3, 1, 2]), Pr.Pb.decode([13, 1, 2])]
+    == [Fail{"the message ends inside a field"}, Fail{"the message ends inside a field"},
+      Fail{"the message ends inside a field"}] : List<&2, Result<&2, &2, String, List<&2, Pr.PbField>>>}
+
+# Groups, field number 0 and a varint past ten bytes are refused.
+law pb_refuses_malformed:
+  {[Pr.Pb.decode([11]), Pr.Pb.decode([0, 1]), Pr.Pb.decode([8, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 1])]
+    == [Fail{"wire type 3, 4, 6 or 7 is not supported"}, Fail{"field number 0"},
+      Fail{"a varint longer than 10 bytes"}] : List<&2, Result<&2, &2, String, List<&2, Pr.PbField>>>}
+
+# A map<string, string> is one entry message per pair, key 1 and value 2.
+law pb_str_map_entries:
+  {Pr.Pb.encode(Pr.Pb.str_map(1, [Pr.PbStr{"a", "b"}])) == [10, 6, 10, 1, 97, 18, 1, 98] : List<&2, U32>}

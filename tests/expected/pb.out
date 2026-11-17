@@ -1,0 +1,4 @@
+a 2f a 7 6f 76 65 72 6c 61 79 12 7 6f 76 65 72 6c 61 79 22 e 6c 6f 77 65 72 64 69 72 3d 2f 61 3a 2f 62 22 b 75 70 70 65 72 64 69 72 3d 2f 63 a 15 a 4 62 69 6e 64 12 2 2f 78 22 2 72 6f 22 5 72 62 69 6e 64 
+[overlay overlay [lowerdir=/a:/b, upperdir=/c], bind /x [ro, rbind]]
+[containerd.io/gc.root=x, k=]
+fail: the message ends inside a field

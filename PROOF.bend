@@ -281,3 +281,51 @@ def Laws.request_declared_over_cap_refused():
 
 def Laws.watch_stops_at_a_bad_line(rv, f, first, m, o):
   {==}
+
+def Laws.pb_varint_150():
+  {==}
+
+def Laws.pb_string_testing():
+  {==}
+
+def Laws.pb_nested_message():
+  {==}
+
+def Laws.pb_packed_varints():
+  {==}
+
+def Laws.pb_defaults_omitted():
+  {==}
+
+def Laws.pb_varint_max():
+  {==}
+
+def Laws.pb_int32_negative():
+  {==}
+
+def Laws.pb_zigzag_table():
+  {==}
+
+def Laws.pb_fixed_little_endian():
+  {==}
+
+def Laws.pb_decode_fields():
+  {==}
+
+def Laws.pb_decode_varint_max():
+  {==}
+
+def Laws.pb_last_value_wins():
+  {==}
+
+def Laws.pb_packed_or_not():
+  {==}
+
+def Laws.pb_refuses_truncated():
+  {==}
+
+def Laws.pb_refuses_malformed():
+  {==}
+
+def Laws.pb_str_map_entries():
+  {==}

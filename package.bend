@@ -22,6 +22,7 @@ import ./src/leader.bend as Leader
 import ./src/lease.bend as Lease
 import ./src/log.bend as Log
 import ./src/net.bend as Net
+import ./src/pb.bend as Pb
 import ./src/proxy.bend as Proxy
 import ./src/queue.bend as Queue
 import ./src/runtime.bend as Runtime
