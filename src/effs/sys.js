@@ -27,3 +27,7 @@ io_eff(CID(Sys.memo_put), (key, val, until) => {
   sys_memo.set(key, { val, until: Number(until) });
   return { $: CID(Unit) };
 });
+
+// Unix sockets: the native lane only (sys.c).
+io_eff(CID(Sys.unix_listen), (path, mode) => io_fail(4000, "Unix sockets need the native lane"));
+io_eff(CID(Sys.unix_connect), (path) => io_fail(4000, "Unix sockets need the native lane"));

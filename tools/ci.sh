@@ -9,7 +9,9 @@
 #   6. the package publishes to a stand-in hub and a controller builds
 #      from it (tests/package.sh);
 #   7. TLS and proxies behave against local servers on both lanes, the
-#      native one under sanitizers (tests/tls.sh; SKIP_TLS=1 skips it).
+#      native one under sanitizers (tests/tls.sh; SKIP_TLS=1 skips it);
+#   8. Unix sockets serve and refuse as they should, under sanitizers
+#      (tests/unix.sh).
 # On macOS with a newer SDK than clang's linker knows, set SDKROOT to an
 # older SDK (for example .../MacOSX26.5.sdk).
 set -eu
@@ -75,4 +77,6 @@ if [ "${SKIP_TLS:-0}" != 1 ]; then
   step "TLS and proxies"
   tests/tls.sh
 fi
+step "Unix sockets"
+tests/unix.sh
 printf '\nall gates pass\n'

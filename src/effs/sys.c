@@ -9,7 +9,9 @@
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/un.h>
 
 // Sys.wall(): (days since 1970-01-01, (second of the day, microseconds)),
 // so no field overflows for millions of years.
@@ -175,5 +177,131 @@ static void __attribute__((constructor)) sys_wall_use(void) {
 #ifdef CID(Sys.signal)
 static void __attribute__((constructor)) sys_signal_use(void) {
   io_eff(CID(Sys.signal), sys_signal_run);
+}
+#endif
+
+// Sys.unix_listen(path, mode): a non-blocking listener on a Unix socket
+// at path, as containerd's plugins and gRPC services serve. A socket file
+// left by a server that is gone (connecting is refused) is replaced; a
+// live one fails with EADDRINUSE, and anything else at path with EEXIST,
+// so no regular file is ever removed. A mode other than 0 is chmod'ed on
+// the socket file. Base's TCP.accept serves the listener.
+static int sys_unix_addr(const char* path, size_t n, struct sockaddr_un* at) {
+  memset(at, 0, sizeof *at);
+  at->sun_family = AF_UNIX;
+  if (n == 0 || n >= sizeof at->sun_path || memchr(path, 0, n) != NULL) {
+    errno = n == 0 || memchr(path, 0, n) != NULL ? EINVAL : ENAMETOOLONG;
+    return -1;
+  }
+  memcpy(at->sun_path, path, n);
+  return 0;
+}
+
+static int sys_unix_socket(void) {
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd >= 0 && (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
+      fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0)) {
+    int code = errno;
+    close(fd);
+    errno = code;
+    return -1;
+  }
+  return fd;
+}
+
+// Clears path for a new socket: 0 when nothing is there or a dead socket
+// was removed, else -1 with errno set.
+static int sys_unix_clear(struct sockaddr_un* at) {
+  struct stat st;
+  if (lstat(at->sun_path, &st) != 0) {
+    return errno == ENOENT ? 0 : -1;
+  }
+  if (!S_ISSOCK(st.st_mode)) {
+    errno = EEXIST;
+    return -1;
+  }
+  int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (probe < 0) {
+    return -1;
+  }
+  int live = connect(probe, (struct sockaddr*)at, sizeof *at) == 0;
+  int code = errno;
+  close(probe);
+  if (live || (code != ECONNREFUSED && code != ENOENT)) {
+    errno = live ? EADDRINUSE : code;
+    return -1;
+  }
+  return unlink(at->sun_path) == 0 || errno == ENOENT ? 0 : -1;
+}
+
+Term sys_unix_listen_run(Env e, Term* f, IoWork* w) {
+  u64 n;
+  char* path = io_cstr(e, f[0], &n);
+  u32 mode = (u32)f[1];
+  struct sockaddr_un at;
+  int fd = -1;
+  if (sys_unix_addr(path, (size_t)n, &at) == 0 && sys_unix_clear(&at) == 0) {
+    fd = sys_unix_socket();
+  }
+  if (fd >= 0 && (bind(fd, (struct sockaddr*)&at, sizeof at) != 0 ||
+      (mode != 0 && chmod(at.sun_path, (mode_t)mode) != 0) || listen(fd, 512) != 0)) {
+    int code = errno;
+    close(fd);
+    fd = -1;
+    errno = code;
+  }
+  uint32_t code = (uint32_t)errno;
+  free(path);
+  return fd < 0 ? io_fail(e, code, NULL) : io_done(e, io_hand(fd));
+}
+
+#ifdef CID(Sys.unix_listen)
+static void __attribute__((constructor)) sys_unix_listen_use(void) {
+  io_eff(CID(Sys.unix_listen), sys_unix_listen_run);
+}
+#endif
+
+// Sys.unix_connect(path): a non-blocking socket connected to the Unix
+// socket at path, for Base's TCP.send and TCP.recv. A connect that is in
+// progress parks until the socket is writable, as Base's TCP.connect does.
+static Term sys_unix_connect_more(Env e, IoWork* w) {
+  int fd = (int)w->made;
+  int err = (int)w->code;
+  socklen_t len = sizeof err;
+  if (err == EINPROGRESS && getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0) {
+    err = errno;
+  }
+  if (err != 0 && fd >= 0) {
+    close(fd);
+  }
+  return err != 0 ? io_fail(e, (u32)err, NULL) : io_done(e, io_hand(fd));
+}
+
+Term sys_unix_connect_run(Env e, Term* f, IoWork* w) {
+  u64 n;
+  char* path = io_cstr(e, f[0], &n);
+  struct sockaddr_un at;
+  int fd = -1;
+  if (sys_unix_addr(path, (size_t)n, &at) == 0) {
+    fd = sys_unix_socket();
+  }
+  free(path);
+  w->made = fd;
+  if (fd < 0) {
+    w->code = (u32)errno;
+    return sys_unix_connect_more(e, w);
+  }
+  int r = connect(fd, (struct sockaddr*)&at, sizeof at);
+  w->code = r == 0 ? 0 : (u32)errno;
+  if (w->code == EINTR) {
+    w->code = EINPROGRESS;
+  }
+  return w->code == EINPROGRESS
+    ? io_wait_on(w, fd, POLLOUT, 0, sys_unix_connect_more) : sys_unix_connect_more(e, w);
+}
+
+#ifdef CID(Sys.unix_connect)
+static void __attribute__((constructor)) sys_unix_connect_use(void) {
+  io_eff(CID(Sys.unix_connect), sys_unix_connect_run);
 }
 #endif

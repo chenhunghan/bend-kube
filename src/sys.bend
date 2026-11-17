@@ -4,7 +4,8 @@ import Base
 # ===
 #
 # Effects Base lacks (effs/sys.c): the wall clock, termination signals, a
-# listener on IPv6 as well as IPv4, and a small table of expiring strings.
+# listener on IPv6 as well as IPv4, Unix sockets, and a small table of
+# expiring strings.
 
 # The wall clock: (days since 1970-01-01, (second of the day,
 # microseconds)). time.bend's Wall.of makes it a Wall.
@@ -56,5 +57,21 @@ def Sys.memo_get(key: String, now: U32) -> IO(String):
   import "./effs/sys.js"
 
 def Sys.memo_put(key: String, value: String, until: U32) -> IO(Unit):
+  import "./effs/sys.c"
+  import "./effs/sys.js"
+
+# A listener on the Unix socket at path (at most 103 bytes on macOS, 107
+# on Linux), which TCP.accept serves. A socket file left by a server that
+# is gone is replaced; a live server's fails with EADDRINUSE (48 on macOS,
+# 98 on Linux), and any other file there with EEXIST, never removed. mode,
+# unless 0, is the socket file's permission bits (0o600 = 384: the owner
+# only). The native lane only: the JS lane answers Fail.
+def Sys.unix_listen(path: String, mode: U32) -> IO(Result<&1, &1, U32 & String, Listener>):
+  import "./effs/sys.c"
+  import "./effs/sys.js"
+
+# A socket connected to the Unix socket at path, for TCP.send and
+# TCP.recv. The native lane only.
+def Sys.unix_connect(path: String) -> IO(Result<&1, &1, U32 & String, Socket>):
   import "./effs/sys.c"
   import "./effs/sys.js"
