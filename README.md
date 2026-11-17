@@ -60,6 +60,7 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/hpack.bend` + `tools/hpack_tables.py` | HPACK (RFC 7541), the `hpack` crate | yes |
 | `src/h2.bend` | the `h2` crate: HTTP/2 framing, streams, flow control (RFC 9113) | yes |
 | `src/grpc.bend` | tonic's codec: gRPC messages, status, `grpc-timeout` | yes |
+| `src/gzip.bend` | flate2's streaming `GzDecoder` (pure Bend, about 5 MB/s) | yes |
 | `src/core.bend` | kube-core: `ApiResource`, `Request`, params, `WatchEvent`, `Status`, `ObjectRef` | yes |
 | `src/config.bend` | kube-client `Config`, kubeconfig, in-cluster | yes |
 | `src/watcher.bend` | kube-runtime `watcher`, client-go `Reflector` | yes |

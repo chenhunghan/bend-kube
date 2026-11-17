@@ -1,0 +1,11 @@
+a fixed-Huffman block: 24 bytes: hello hello hello world
+
+a stored block (gzip -0): 3 bytes: abc
+a member with a file name: 1 bytes: x
+a dynamic-Huffman block with back references: 175 bytes: the quick brown fox jumps over the lazy dog; the quick brown
+two members, one stream: 7 bytes: one two
+a wrong CRC-32: fail: the member's CRC-32 does not match its data
+a stream cut short: fail: the gzip stream ends early
+not gzip: fail: not a gzip stream
+whole: 900 bytes: the quick brown fox jumps over the lazy dog; the quick brown
+a byte at a time: 900 bytes: the quick brown fox jumps over the lazy dog; the quick brown
