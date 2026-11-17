@@ -417,10 +417,17 @@ def H2io.got_headers(r: H2Resp, hs: List<&2, H.Header>) -> H2Resp:
     case H2Resp{h, b, t}:
       H2Resp{h, b, List.append(&2, H.Header, t, hs)}
 
+# While a response is collected, its body is kept reversed, so each DATA
+# frame costs its own length; H2io.fin turns it round.
 def H2io.got_data(r: H2Resp, bs: List<&2, U32>) -> H2Resp:
   match r:
     case H2Resp{h, b, t}:
-      H2Resp{h, List.append(&2, U32, b, bs), t}
+      H2Resp{h, List.append(&2, U32, List.reverse(&2, U32, bs), b), t}
+
+def H2io.fin(r: H2Resp) -> H2Resp:
+  match r:
+    case H2Resp{h, b, t}:
+      H2Resp{h, List.reverse(&2, U32, b), t}
 
 type CEv is Type:
   CEv{r: H2Resp, m: Maybe<&1, SEv>}
@@ -432,9 +439,9 @@ def H2io.collect(outer: Nat, fuel: Nat, ev: CEv, +back: Chan(SEv)) -> IO(Result<
     case 1n+o 0n e:
       H2io.collect(o, H2io.fuel(), e, back)
     case o 1n+f CEv{r, Some{SGot{T.EvHeaders{sid, hs, True{}}}}}:
-      IO.pure(Result<&2, &2, String, H2Resp>, Done{H2io.got_headers(r, hs)})
+      IO.pure(Result<&2, &2, String, H2Resp>, Done{H2io.fin(H2io.got_headers(r, hs))})
     case o 1n+f CEv{r, Some{SGot{T.EvData{sid, bs, True{}}}}}:
-      IO.pure(Result<&2, &2, String, H2Resp>, Done{H2io.got_data(r, bs)})
+      IO.pure(Result<&2, &2, String, H2Resp>, Done{H2io.fin(H2io.got_data(r, bs))})
     case o 1n+f CEv{r, Some{SGot{T.EvHeaders{sid, hs, False{}}}}}:
       do IO<Result<&2, &2, String, H2Resp>>:
         m : Maybe<&1, SEv> <- Chan.recv(SEv, back)

@@ -464,8 +464,9 @@ def H2.hblock(fuel: Nat, +sid: U32, +first: Bool, +end: Bool, +bs: List<&2, U32>
         U32.is_le(H2.len(List.drop(&2, U32, bs, U32.to_nat(mf))), mf))
 
 # DATA frames of at most mf bytes, END_STREAM on the last if end.
+# (n is bs's length, kept so no frame measures the rest again.)
 def H2.dsplit(fuel: Nat, +sid: U32, +end: Bool, +bs: List<&2, U32>, +mf: U32,
-  out: List<&2, List<&2, U32>>, fits: Bool) -> List<&2, List<&2, U32>>:
+  out: List<&2, List<&2, U32>>, +n: U32, fits: Bool) -> List<&2, List<&2, U32>>:
   match fuel fits:
     case 0n x:
       out
@@ -474,7 +475,7 @@ def H2.dsplit(fuel: Nat, +sid: U32, +end: Bool, +bs: List<&2, U32>, +mf: U32,
     case 1n+f False{}:
       H2.dsplit(f, sid, end, List.drop(&2, U32, bs, U32.to_nat(mf)), mf,
         Con{H2.frame(0, 0, sid, List.take(&2, U32, bs, U32.to_nat(mf))), out},
-        U32.is_le(H2.len(List.drop(&2, U32, bs, U32.to_nat(mf))), mf))
+        U32.sub(n, mf), U32.is_le(U32.sub(n, mf), mf))
 
 def H2.frames(+n: U32, +mf: U32) -> Nat:
   U32.to_nat(U32.add(U32.div(n, mf), 1))
@@ -503,10 +504,10 @@ def H2.d_data(+id: U32, +sw: U32, +ru: U32, +le: Bool, +re: Bool, +csw: U32, enc
   match all some:
     case True{} x:
       DGo{DEv{id, U32.sub(sw, n), ru, end, re, U32.sub(csw, n), enc, mf,
-        H2.dsplit(H2.frames(n, mf), id, end, bs, mf, out, U32.is_le(n, mf))}}
+        H2.dsplit(H2.frames(n, mf), id, end, bs, mf, out, n, U32.is_le(n, mf))}}
     case False{} True{}:
       DStop{DEv{id, U32.sub(sw, av), ru, le, re, U32.sub(csw, av), enc, mf,
-        H2.dsplit(H2.frames(av, mf), id, False{}, List.take(&2, U32, bs, U32.to_nat(av)), mf, out, U32.is_le(av, mf))},
+        H2.dsplit(H2.frames(av, mf), id, False{}, List.take(&2, U32, bs, U32.to_nat(av)), mf, out, av, U32.is_le(av, mf))},
         CData{List.drop(&2, U32, bs, U32.to_nat(av)), end}}
     case False{} False{}:
       DStop{DEv{id, sw, ru, le, re, csw, enc, mf, out}, CData{bs, end}}
