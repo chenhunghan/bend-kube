@@ -73,7 +73,7 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/admission.bend` | controller-runtime `admission.Response`, `conversion` reviews, request framing | yes |
 | `src/net.bend` + `src/effs/tls.c` | rustls / crypto/tls (OpenSSL via `dlopen`) | effect |
 | `src/sys.bend` + `src/effs/sys.c` | wall clock, SIGTERM, Unix sockets, `dup` | effect |
-| `src/unz.bend` + `src/effs/unz.c` | flate2 / zstd streaming decoders (zlib and libzstd via `dlopen`) | effect |
+| `src/unz.bend` + `src/effs/unz.c` | flate2 / zstd streaming decoders (zlib and libzstd via `dlopen`), into a list or straight into a file | effect |
 | `src/h2io.bend` | `h2` over a socket: h2c server and client | IO |
 | `src/grpcio.bend` | tonic: gRPC servers and clients (unary, server streaming) | IO |
 | `src/client.bend` | kube-client `Client`, `Api<K>` verbs | IO |

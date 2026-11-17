@@ -16,6 +16,22 @@ import Base
 # Members (gzip) and frames (zstd) one after another are one stream. A
 # feed whose output passes max bytes fails, so a small input cannot
 # expand without bound. A decoder must be closed, even after a failure.
+#
+# Output can go straight to a file instead, so it never becomes a Bend
+# list (a layer's payload at the libraries' speed):
+#
+#   id <- Unz.open(Unz.gzip())
+#   Unz.sink(id, path)              creates (0644) or truncates the file
+#   n <- Unz.write(id, chunk, max)  for each chunk: how many bytes it wrote
+#   Unz.close(id)                   fsyncs and closes the file too
+#
+# or a whole compressed file at once, on a helper thread:
+#
+#   (hi, lo) <- Unz.file(Unz.gzip(), src, dst, max_mib)
+#
+# which writes dst (0644), fsyncs it and answers its size in two 32-bit
+# halves; past max_mib MiB of output (0: no limit), bad data, or input
+# that ends early fails and removes dst.
 
 def Unz.gzip() -> U32:
   0
@@ -32,5 +48,17 @@ def Unz.feed(id: U32, bytes: List<&2, U32>, max: U32) -> IO(Result<&1, &1, U32 &
   import "./effs/unz.js"
 
 def Unz.close(id: U32) -> IO(Result<&1, &1, U32 & String, Unit>):
+  import "./effs/unz.c"
+  import "./effs/unz.js"
+
+def Unz.sink(id: U32, path: String) -> IO(Result<&1, &1, U32 & String, Unit>):
+  import "./effs/unz.c"
+  import "./effs/unz.js"
+
+def Unz.write(id: U32, bytes: List<&2, U32>, max: U32) -> IO(Result<&1, &1, U32 & String, U32>):
+  import "./effs/unz.c"
+  import "./effs/unz.js"
+
+def Unz.file(kind: U32, src: String, dst: String, max_mib: U32) -> IO(Result<&1, &1, U32 & String, U32 & U32>):
   import "./effs/unz.c"
   import "./effs/unz.js"
