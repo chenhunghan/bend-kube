@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/chenhunghan/bend-kube/compare/v0.9.0...v0.10.0) (2026-11-17)
+
+
+### Features
+
+* decompress straight into a file (Unz.sink, Unz.write, Unz.file) ([b9bdaba](https://github.com/chenhunghan/bend-kube/commit/b9bdaba69088d47e8f3f02d60fc27194426c1883))
+
 ## [0.9.0](https://github.com/chenhunghan/bend-kube/compare/v0.8.1...v0.9.0) (2026-11-17)
 
 
