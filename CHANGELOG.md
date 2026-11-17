@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.0](https://github.com/chenhunghan/bend-kube/compare/v0.8.1...v0.9.0) (2026-11-17)
+
+
+### Features
+
+* a streaming gzip decoder in pure Bend (src/gzip.bend) ([a7b162a](https://github.com/chenhunghan/bend-kube/commit/a7b162afd7dd4f611f129767353186da80b236be))
+* gRPC servers and clients (src/grpc.bend, src/grpcio.bend) ([1319853](https://github.com/chenhunghan/bend-kube/commit/1319853c068577b162be726539aa582bef6b9abd))
+* gzip and zstd decompression through zlib and libzstd (src/unz.bend) ([3e18bba](https://github.com/chenhunghan/bend-kube/commit/3e18bbaf58cb9210b59b82796cca308bf2e063f4))
+* HPACK header compression (src/hpack.bend) ([8f37216](https://github.com/chenhunghan/bend-kube/commit/8f3721678a07d1826d7b02410d847068bb4ab1d8))
+* HTTP/2 over sockets (src/h2.bend, src/h2io.bend) ([798ba98](https://github.com/chenhunghan/bend-kube/commit/798ba983e6bd466a124d06a90413e39054eb5aaa))
+* protobuf wire format (src/pb.bend) ([af29f5c](https://github.com/chenhunghan/bend-kube/commit/af29f5c0527b5c419a03bb66e71e8da5d6120a5b))
+* Unix-socket listen and connect (Sys.unix_listen, Sys.unix_connect) ([7d9b6e0](https://github.com/chenhunghan/bend-kube/commit/7d9b6e064be8ac48b14300a182b93cd2d37ae1ec))
+
+
+### Performance Improvements
+
+* HTTP/2 bodies in linear time ([abfd2af](https://github.com/chenhunghan/bend-kube/commit/abfd2afd7501fe1bb40bf2ffe10ae154908ada7b))
+
 ## [0.8.1](https://github.com/chenhunghan/bend-kube/compare/v0.8.0...v0.8.1) (2026-11-10)
 
 
