@@ -413,3 +413,24 @@ def Laws.h2_goaway_refuses_later():
 
 def Laws.h2_no_stream_after_goaway():
   {==}
+
+def Laws.grpc_frame():
+  {==}
+
+def Laws.grpc_unframe():
+  {==}
+
+def Laws.grpc_unframe_refusals():
+  {==}
+
+def Laws.grpc_timeout_units():
+  {==}
+
+def Laws.grpc_message_round_trip():
+  {==}
+
+def Laws.grpc_trailers_only():
+  {==}
+
+def Laws.grpc_missing_status_unknown():
+  {==}

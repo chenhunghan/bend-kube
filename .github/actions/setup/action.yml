@@ -1,5 +1,6 @@
 # The tools tools/ci.sh needs, in a debian:trixie-slim job container: clang
-# with sanitizer runtimes, OpenSSL, the pinned Bend, and the Lean toolchain
+# with sanitizer runtimes, OpenSSL, curl (with HTTP/2), grpcurl (a grpc-go
+# client, for tests/grpc.sh), the pinned Bend, and the Lean toolchain
 # `bend --verdict` builds its kernel with (cached with the built kernel).
 name: setup
 description: Install clang, OpenSSL, Bend and Lean for tools/ci.sh
@@ -27,3 +28,13 @@ runs:
           | sh -s -- -y --no-modify-path --default-toolchain leanprover/lean4:v4.34.0
         echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
         echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+    - name: Install grpcurl
+      shell: sh
+      run: |
+        case $(uname -m) in
+          x86_64) arch=x86_64 sum=a926b62a85787ccf73ef8736b3ae554f1242e39d92bb8767a79d6dd23b11d1d5;;
+          aarch64) arch=arm64 sum=b20a00c1cb82ab81ec32696766d4076e99b4cb5ca0823a71767ba64dbea0f263;;
+        esac
+        curl -sSfLo /tmp/grpcurl.tgz "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.3/grpcurl_1.9.3_linux_${arch}.tar.gz"
+        echo "$sum  /tmp/grpcurl.tgz" | sha256sum -c -
+        tar -xzf /tmp/grpcurl.tgz -C /usr/local/bin grpcurl

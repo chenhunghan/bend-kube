@@ -16,6 +16,7 @@ import ./src/admission.bend as A
 import ./src/pb.bend as Pr
 import ./src/hpack.bend as Hp
 import ./src/h2.bend as Tw
+import ./src/grpc.bend as Gr
 
 # LAWS
 # ====
@@ -999,3 +1000,48 @@ law h2_goaway_refuses_later:
 law h2_no_stream_after_goaway:
   {Tw.H2.opened_sid(Tw.H2.open(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(False{})), [0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
       [H.Header{":method", "GET"}], True{})) == 0 : U32}
+
+# gRPC (grpc/doc/PROTOCOL-HTTP2.md)
+# ---------------------------------
+
+# A message on the wire: no compression, a 4-byte big-endian length, the
+# bytes.
+law grpc_frame:
+  {Gr.Grpc.frame([8, 150, 1]) == [0, 0, 0, 0, 3, 8, 150, 1] : List<&2, U32>}
+
+# A body splits into its messages, an empty one included.
+law grpc_unframe:
+  {Gr.Grpc.unframe([0, 0, 0, 0, 1, 7, 0, 0, 0, 0, 0])
+    == Done{[[7], []]} : Result<&2, &2, Gr.GStatus, List<&2, List<&2, U32>>>}
+
+# Compressed, cut-off and oversized messages are refused with a status.
+law grpc_unframe_refusals:
+  {[Gr.Grpc.unframe([1, 0, 0, 0, 1, 7]), Gr.Grpc.unframe([0, 0, 0, 0, 2, 7]), Gr.Grpc.unframe([0, 0, 64, 0, 1])]
+    == [Fail{Gr.GStatus{12, "compressed messages are not supported"}},
+      Fail{Gr.GStatus{13, "the stream ends inside a message"}},
+      Fail{Gr.GStatus{8, "a message of 4194305 bytes is past the 4 MiB limit"}}]
+    : List<&2, Result<&2, &2, Gr.GStatus, List<&2, List<&2, U32>>>>}
+
+# grpc-timeout: up to 8 digits and a unit, in milliseconds, rounded up.
+law grpc_timeout_units:
+  {[Gr.Grpc.timeout("10S"), Gr.Grpc.timeout("250m"), Gr.Grpc.timeout("1H"), Gr.Grpc.timeout("2M"),
+    Gr.Grpc.timeout("1500u"), Gr.Grpc.timeout("1n"), Gr.Grpc.timeout("123456789S"), Gr.Grpc.timeout("S"),
+    Gr.Grpc.timeout("5x")]
+    == [Some{10000}, Some{250}, Some{3600000}, Some{120000}, Some{2}, Some{1}, None{}, None{}, None{}]
+    : List<&2, Maybe<&2, U32>>}
+
+# grpc-message is percent-encoded UTF-8, and decodes back.
+law grpc_message_round_trip:
+  {[Gr.Grpc.status_headers(Gr.GStatus{3, "a%b ✓"}), [H.Header{"x", Gr.GStatus.msg(Gr.Grpc.status_of(Gr.Grpc.status_headers(Gr.GStatus{3, "a%b ✓"})))}]]
+    == [[H.Header{"grpc-status", "3"}, H.Header{"grpc-message", "a%25b %E2%9C%93"}], [H.Header{"x", "a%b ✓"}]]
+    : List<&2, List<&2, H.Header>>}
+
+# An answer with no message is one block ("Trailers-Only"); a missing
+# grpc-status reads as UNKNOWN.
+law grpc_trailers_only:
+  {[Gr.Grpc.trailers(Gr.GStatus{12, ""}, True{}), Gr.Grpc.trailers(Gr.GStatus{0, ""}, False{})]
+    == [[H.Header{":status", "200"}, H.Header{"content-type", "application/grpc"}, H.Header{"grpc-status", "12"}],
+      [H.Header{"grpc-status", "0"}]] : List<&2, List<&2, H.Header>>}
+
+law grpc_missing_status_unknown:
+  {Gr.Grpc.status_of([]) == Gr.GStatus{2, ""} : Gr.GStatus}

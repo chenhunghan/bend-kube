@@ -56,6 +56,10 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/utf8.bend`, `src/base64.bend`, `src/time.bend` | std / chrono | yes |
 | `src/http.bend` | hyper's HTTP/1.1 codec | yes |
 | `src/ws.bend` | WebSocket framing (RFC 6455) | yes |
+| `src/pb.bend` | protobuf wire format (prost's encoding) | yes |
+| `src/hpack.bend` + `tools/hpack_tables.py` | HPACK (RFC 7541), the `hpack` crate | yes |
+| `src/h2.bend` | the `h2` crate: HTTP/2 framing, streams, flow control (RFC 9113) | yes |
+| `src/grpc.bend` | tonic's codec: gRPC messages, status, `grpc-timeout` | yes |
 | `src/core.bend` | kube-core: `ApiResource`, `Request`, params, `WatchEvent`, `Status`, `ObjectRef` | yes |
 | `src/config.bend` | kube-client `Config`, kubeconfig, in-cluster | yes |
 | `src/watcher.bend` | kube-runtime `watcher`, client-go `Reflector` | yes |
@@ -67,7 +71,9 @@ The hub wants four-number versions: release `vX.Y.Z` is
 | `src/proxy.bend` | Go's `ProxyFromEnvironment` and the CONNECT exchange | yes |
 | `src/admission.bend` | controller-runtime `admission.Response`, `conversion` reviews, request framing | yes |
 | `src/net.bend` + `src/effs/tls.c` | rustls / crypto/tls (OpenSSL via `dlopen`) | effect |
-| `src/sys.bend` + `src/effs/sys.c` | wall clock, SIGTERM | effect |
+| `src/sys.bend` + `src/effs/sys.c` | wall clock, SIGTERM, Unix sockets, `dup` | effect |
+| `src/h2io.bend` | `h2` over a socket: h2c server and client | IO |
+| `src/grpcio.bend` | tonic: gRPC servers and clients (unary, server streaming) | IO |
 | `src/client.bend` | kube-client `Client`, `Api<K>` verbs | IO |
 | `src/stream.bend` | kube-client `log_stream`: a streaming GET, such as a followed pod log | IO |
 | `src/exec.bend` | kube-client `exec` (`v5.channel.k8s.io` over WebSocket) | IO |

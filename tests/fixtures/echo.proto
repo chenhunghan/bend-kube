@@ -1,0 +1,17 @@
+// The service tests/grpc.sh calls on tests/fixtures/grpc_echo.bend.
+syntax = "proto3";
+package bendtest;
+
+message Msg {
+  string text = 1;
+  int64 n = 2;
+  repeated string tags = 3;
+  map<string, string> labels = 4;
+}
+
+service Echo {
+  rpc Say(Msg) returns (Msg);
+  rpc Count(Msg) returns (stream Msg);
+  rpc Fail(Msg) returns (Msg);
+  rpc Slow(Msg) returns (Msg);
+}
