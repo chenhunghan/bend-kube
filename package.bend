@@ -15,6 +15,7 @@ import ./src/core.bend as Core
 import ./src/exec.bend as Exec
 import ./src/finalizer.bend as Finalizer
 import ./src/helpers.bend as Helpers
+import ./src/hpack.bend as Hpack
 import ./src/http.bend as Http
 import ./src/json.bend as Json
 import ./src/kube.bend as Kube

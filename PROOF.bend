@@ -329,3 +329,57 @@ def Laws.pb_refuses_malformed():
 
 def Laws.pb_str_map_entries():
   {==}
+
+def Laws.hpack_c1_integers():
+  {==}
+
+def Laws.hpack_c2_1_literal_indexed():
+  {==}
+
+def Laws.hpack_c2_2_literal_not_indexed():
+  {==}
+
+def Laws.hpack_c2_3_literal_never_indexed():
+  {==}
+
+def Laws.hpack_c2_4_indexed():
+  {==}
+
+def Laws.hpack_c3_requests_decode():
+  {==}
+
+def Laws.hpack_c3_requests_encode():
+  {==}
+
+def Laws.hpack_c4_requests_huffman_decode():
+  {==}
+
+def Laws.hpack_c4_requests_huffman_encode():
+  {==}
+
+def Laws.hpack_c5_responses_decode():
+  {==}
+
+def Laws.hpack_c5_responses_encode():
+  {==}
+
+def Laws.hpack_c6_responses_huffman_decode():
+  {==}
+
+def Laws.hpack_c6_responses_huffman_encode():
+  {==}
+
+def Laws.hpack_huffman_refusals():
+  {==}
+
+def Laws.hpack_decode_refusals():
+  {==}
+
+def Laws.hpack_list_capped():
+  {==}
+
+def Laws.hpack_size_update_evicts():
+  {==}
+
+def Laws.hpack_encoder_signals_resize():
+  {==}

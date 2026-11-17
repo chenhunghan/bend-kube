@@ -14,6 +14,7 @@ import ./src/cond.bend as Co
 import ./src/config.bend as K
 import ./src/admission.bend as A
 import ./src/pb.bend as Pr
+import ./src/hpack.bend as Hp
 
 # LAWS
 # ====
@@ -818,3 +819,111 @@ law pb_refuses_malformed:
 # A map<string, string> is one entry message per pair, key 1 and value 2.
 law pb_str_map_entries:
   {Pr.Pb.encode(Pr.Pb.str_map(1, [Pr.PbStr{"a", "b"}])) == [10, 6, 10, 1, 97, 18, 1, 98] : List<&2, U32>}
+
+# HPACK (RFC 7541)
+# ----------------
+
+# RFC 7541 C.1: 10 and 1337 with a 5-bit prefix, 42 with an 8-bit one.
+law hpack_c1_integers:
+  {[Hp.Hp.int(0, 31, 10), Hp.Hp.int(0, 31, 1337), Hp.Hp.int(0, 255, 42)]
+    == [[10], [31, 154, 10], [42]] : List<&2, List<&2, U32>>}
+
+# RFC 7541 C.2.1: a literal with indexing enters the table.
+law hpack_c2_1_literal_indexed:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[64, 10, 99, 117, 115, 116, 111, 109, 45, 107, 101, 121, 13, 99, 117, 115, 116, 111, 109, 45, 104, 101, 97, 100, 101, 114]])
+    == Done{Hp.HSeq{[[H.Header{"custom-key", "custom-header"}]], [H.Header{"custom-key", "custom-header"}], 55}} : Result<&2, &2, String, Hp.HSeq>}
+
+# RFC 7541 C.2.2: a literal without indexing leaves the table empty.
+law hpack_c2_2_literal_not_indexed:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[4, 12, 47, 115, 97, 109, 112, 108, 101, 47, 112, 97, 116, 104]])
+    == Done{Hp.HSeq{[[H.Header{":path", "/sample/path"}]], [], 0}} : Result<&2, &2, String, Hp.HSeq>}
+
+# RFC 7541 C.2.3: a never-indexed literal leaves the table empty.
+law hpack_c2_3_literal_never_indexed:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[16, 8, 112, 97, 115, 115, 119, 111, 114, 100, 6, 115, 101, 99, 114, 101, 116]])
+    == Done{Hp.HSeq{[[H.Header{"password", "secret"}]], [], 0}} : Result<&2, &2, String, Hp.HSeq>}
+
+# RFC 7541 C.2.4: an indexed field from the static table.
+law hpack_c2_4_indexed:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[130]])
+    == Done{Hp.HSeq{[[H.Header{":method", "GET"}]], [], 0}} : Result<&2, &2, String, Hp.HSeq>}
+
+# RFC 7541 C.3: three requests without Huffman, one table across them.
+law hpack_c3_requests_decode:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[130, 134, 132, 65, 15, 119, 119, 119, 46, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111, 109], [130, 134, 132, 190, 88, 8, 110, 111, 45, 99, 97, 99, 104, 101], [130, 135, 133, 191, 64, 10, 99, 117, 115, 116, 111, 109, 45, 107, 101, 121, 12, 99, 117, 115, 116, 111, 109, 45, 118, 97, 108, 117, 101]])
+    == Done{Hp.HSeq{[[H.Header{":method", "GET"}, H.Header{":scheme", "http"}, H.Header{":path", "/"}, H.Header{":authority", "www.example.com"}], [H.Header{":method", "GET"}, H.Header{":scheme", "http"}, H.Header{":path", "/"}, H.Header{":authority", "www.example.com"}, H.Header{"cache-control", "no-cache"}], [H.Header{":method", "GET"}, H.Header{":scheme", "https"}, H.Header{":path", "/index.html"}, H.Header{":authority", "www.example.com"}, H.Header{"custom-key", "custom-value"}]], [H.Header{"custom-key", "custom-value"}, H.Header{"cache-control", "no-cache"}, H.Header{":authority", "www.example.com"}], 164}} : Result<&2, &2, String, Hp.HSeq>}
+
+# RFC 7541 C.3, encoded: the same bytes from the same headers.
+law hpack_c3_requests_encode:
+  {Hp.Hp.encode_seq(Hp.Hp.enc_new(4096, False{}), [[H.Header{":method", "GET"}, H.Header{":scheme", "http"}, H.Header{":path", "/"}, H.Header{":authority", "www.example.com"}], [H.Header{":method", "GET"}, H.Header{":scheme", "http"}, H.Header{":path", "/"}, H.Header{":authority", "www.example.com"}, H.Header{"cache-control", "no-cache"}], [H.Header{":method", "GET"}, H.Header{":scheme", "https"}, H.Header{":path", "/index.html"}, H.Header{":authority", "www.example.com"}, H.Header{"custom-key", "custom-value"}]])
+    == [[130, 134, 132, 65, 15, 119, 119, 119, 46, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111, 109], [130, 134, 132, 190, 88, 8, 110, 111, 45, 99, 97, 99, 104, 101], [130, 135, 133, 191, 64, 10, 99, 117, 115, 116, 111, 109, 45, 107, 101, 121, 12, 99, 117, 115, 116, 111, 109, 45, 118, 97, 108, 117, 101]] : List<&2, List<&2, U32>>}
+
+# RFC 7541 C.4: the same requests, Huffman-coded.
+law hpack_c4_requests_huffman_decode:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[130, 134, 132, 65, 140, 241, 227, 194, 229, 242, 58, 107, 160, 171, 144, 244, 255], [130, 134, 132, 190, 88, 134, 168, 235, 16, 100, 156, 191], [130, 135, 133, 191, 64, 136, 37, 168, 73, 233, 91, 169, 125, 127, 137, 37, 168, 73, 233, 91, 184, 232, 180, 191]])
+    == Done{Hp.HSeq{[[H.Header{":method", "GET"}, H.Header{":scheme", "http"}, H.Header{":path", "/"}, H.Header{":authority", "www.example.com"}], [H.Header{":method", "GET"}, H.Header{":scheme", "http"}, H.Header{":path", "/"}, H.Header{":authority", "www.example.com"}, H.Header{"cache-control", "no-cache"}], [H.Header{":method", "GET"}, H.Header{":scheme", "https"}, H.Header{":path", "/index.html"}, H.Header{":authority", "www.example.com"}, H.Header{"custom-key", "custom-value"}]], [H.Header{"custom-key", "custom-value"}, H.Header{"cache-control", "no-cache"}, H.Header{":authority", "www.example.com"}], 164}} : Result<&2, &2, String, Hp.HSeq>}
+
+# RFC 7541 C.4, encoded with Huffman.
+law hpack_c4_requests_huffman_encode:
+  {Hp.Hp.encode_seq(Hp.Hp.enc_new(4096, True{}), [[H.Header{":method", "GET"}, H.Header{":scheme", "http"}, H.Header{":path", "/"}, H.Header{":authority", "www.example.com"}], [H.Header{":method", "GET"}, H.Header{":scheme", "http"}, H.Header{":path", "/"}, H.Header{":authority", "www.example.com"}, H.Header{"cache-control", "no-cache"}], [H.Header{":method", "GET"}, H.Header{":scheme", "https"}, H.Header{":path", "/index.html"}, H.Header{":authority", "www.example.com"}, H.Header{"custom-key", "custom-value"}]])
+    == [[130, 134, 132, 65, 140, 241, 227, 194, 229, 242, 58, 107, 160, 171, 144, 244, 255], [130, 134, 132, 190, 88, 134, 168, 235, 16, 100, 156, 191], [130, 135, 133, 191, 64, 136, 37, 168, 73, 233, 91, 169, 125, 127, 137, 37, 168, 73, 233, 91, 184, 232, 180, 191]] : List<&2, List<&2, U32>>}
+
+# RFC 7541 C.5: three responses in a 256-byte table, which evicts.
+law hpack_c5_responses_decode:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(256, 65536), [[72, 3, 51, 48, 50, 88, 7, 112, 114, 105, 118, 97, 116, 101, 97, 29, 77, 111, 110, 44, 32, 50, 49, 32, 79, 99, 116, 32, 50, 48, 49, 51, 32, 50, 48, 58, 49, 51, 58, 50, 49, 32, 71, 77, 84, 110, 23, 104, 116, 116, 112, 115, 58, 47, 47, 119, 119, 119, 46, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111, 109], [72, 3, 51, 48, 55, 193, 192, 191], [136, 193, 97, 29, 77, 111, 110, 44, 32, 50, 49, 32, 79, 99, 116, 32, 50, 48, 49, 51, 32, 50, 48, 58, 49, 51, 58, 50, 50, 32, 71, 77, 84, 192, 90, 4, 103, 122, 105, 112, 119, 56, 102, 111, 111, 61, 65, 83, 68, 74, 75, 72, 81, 75, 66, 90, 88, 79, 81, 87, 69, 79, 80, 73, 85, 65, 88, 81, 87, 69, 79, 73, 85, 59, 32, 109, 97, 120, 45, 97, 103, 101, 61, 51, 54, 48, 48, 59, 32, 118, 101, 114, 115, 105, 111, 110, 61, 49]])
+    == Done{Hp.HSeq{[[H.Header{":status", "302"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:21 GMT"}, H.Header{"location", "https://www.example.com"}], [H.Header{":status", "307"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:21 GMT"}, H.Header{"location", "https://www.example.com"}], [H.Header{":status", "200"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:22 GMT"}, H.Header{"location", "https://www.example.com"}, H.Header{"content-encoding", "gzip"}, H.Header{"set-cookie", "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"}]], [H.Header{"set-cookie", "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"}, H.Header{"content-encoding", "gzip"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:22 GMT"}], 215}} : Result<&2, &2, String, Hp.HSeq>}
+
+# RFC 7541 C.5, encoded.
+law hpack_c5_responses_encode:
+  {Hp.Hp.encode_seq(Hp.Hp.enc_new(256, False{}), [[H.Header{":status", "302"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:21 GMT"}, H.Header{"location", "https://www.example.com"}], [H.Header{":status", "307"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:21 GMT"}, H.Header{"location", "https://www.example.com"}], [H.Header{":status", "200"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:22 GMT"}, H.Header{"location", "https://www.example.com"}, H.Header{"content-encoding", "gzip"}, H.Header{"set-cookie", "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"}]])
+    == [[72, 3, 51, 48, 50, 88, 7, 112, 114, 105, 118, 97, 116, 101, 97, 29, 77, 111, 110, 44, 32, 50, 49, 32, 79, 99, 116, 32, 50, 48, 49, 51, 32, 50, 48, 58, 49, 51, 58, 50, 49, 32, 71, 77, 84, 110, 23, 104, 116, 116, 112, 115, 58, 47, 47, 119, 119, 119, 46, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111, 109], [72, 3, 51, 48, 55, 193, 192, 191], [136, 193, 97, 29, 77, 111, 110, 44, 32, 50, 49, 32, 79, 99, 116, 32, 50, 48, 49, 51, 32, 50, 48, 58, 49, 51, 58, 50, 50, 32, 71, 77, 84, 192, 90, 4, 103, 122, 105, 112, 119, 56, 102, 111, 111, 61, 65, 83, 68, 74, 75, 72, 81, 75, 66, 90, 88, 79, 81, 87, 69, 79, 80, 73, 85, 65, 88, 81, 87, 69, 79, 73, 85, 59, 32, 109, 97, 120, 45, 97, 103, 101, 61, 51, 54, 48, 48, 59, 32, 118, 101, 114, 115, 105, 111, 110, 61, 49]] : List<&2, List<&2, U32>>}
+
+# RFC 7541 C.6: the same responses, Huffman-coded.
+law hpack_c6_responses_huffman_decode:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(256, 65536), [[72, 130, 100, 2, 88, 133, 174, 195, 119, 26, 75, 97, 150, 208, 122, 190, 148, 16, 84, 212, 68, 168, 32, 5, 149, 4, 11, 129, 102, 224, 130, 166, 45, 27, 255, 110, 145, 157, 41, 173, 23, 24, 99, 199, 143, 11, 151, 200, 233, 174, 130, 174, 67, 211], [72, 131, 100, 14, 255, 193, 192, 191], [136, 193, 97, 150, 208, 122, 190, 148, 16, 84, 212, 68, 168, 32, 5, 149, 4, 11, 129, 102, 224, 132, 166, 45, 27, 255, 192, 90, 131, 155, 217, 171, 119, 173, 148, 231, 130, 29, 215, 242, 230, 199, 179, 53, 223, 223, 205, 91, 57, 96, 213, 175, 39, 8, 127, 54, 114, 193, 171, 39, 15, 181, 41, 31, 149, 135, 49, 96, 101, 192, 3, 237, 78, 229, 177, 6, 61, 80, 7]])
+    == Done{Hp.HSeq{[[H.Header{":status", "302"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:21 GMT"}, H.Header{"location", "https://www.example.com"}], [H.Header{":status", "307"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:21 GMT"}, H.Header{"location", "https://www.example.com"}], [H.Header{":status", "200"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:22 GMT"}, H.Header{"location", "https://www.example.com"}, H.Header{"content-encoding", "gzip"}, H.Header{"set-cookie", "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"}]], [H.Header{"set-cookie", "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"}, H.Header{"content-encoding", "gzip"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:22 GMT"}], 215}} : Result<&2, &2, String, Hp.HSeq>}
+
+# RFC 7541 C.6, encoded with Huffman.
+law hpack_c6_responses_huffman_encode:
+  {Hp.Hp.encode_seq(Hp.Hp.enc_new(256, True{}), [[H.Header{":status", "302"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:21 GMT"}, H.Header{"location", "https://www.example.com"}], [H.Header{":status", "307"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:21 GMT"}, H.Header{"location", "https://www.example.com"}], [H.Header{":status", "200"}, H.Header{"cache-control", "private"}, H.Header{"date", "Mon, 21 Oct 2013 20:13:22 GMT"}, H.Header{"location", "https://www.example.com"}, H.Header{"content-encoding", "gzip"}, H.Header{"set-cookie", "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"}]])
+    == [[72, 130, 100, 2, 88, 133, 174, 195, 119, 26, 75, 97, 150, 208, 122, 190, 148, 16, 84, 212, 68, 168, 32, 5, 149, 4, 11, 129, 102, 224, 130, 166, 45, 27, 255, 110, 145, 157, 41, 173, 23, 24, 99, 199, 143, 11, 151, 200, 233, 174, 130, 174, 67, 211], [72, 131, 100, 14, 255, 193, 192, 191], [136, 193, 97, 150, 208, 122, 190, 148, 16, 84, 212, 68, 168, 32, 5, 149, 4, 11, 129, 102, 224, 132, 166, 45, 27, 255, 192, 90, 131, 155, 217, 171, 119, 173, 148, 231, 130, 29, 215, 242, 230, 199, 179, 53, 223, 223, 205, 91, 57, 96, 213, 175, 39, 8, 127, 54, 114, 193, 171, 39, 15, 181, 41, 31, 149, 135, 49, 96, 101, 192, 3, 237, 78, 229, 177, 6, 61, 80, 7]] : List<&2, List<&2, U32>>}
+
+# Huffman padding is under 8 bits and all 1s, and EOS never appears.
+law hpack_huffman_refusals:
+  {[Hp.Hp.unhuff([0]), Hp.Hp.unhuff([255]), Hp.Hp.unhuff([255, 255, 255, 255]), Hp.Hp.unhuff([7])]
+    == [Fail{"bad Huffman padding"}, Fail{"bad Huffman padding"}, Fail{"EOS inside a Huffman string"},
+      Done{"0"}] : List<&2, Result<&2, &2, String, String>>}
+
+# An index with no entry, a size update past the limit or after a header,
+# an integer past 2^28 and a block that ends inside a field are refused.
+law hpack_decode_refusals:
+  {[Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[128]]),
+    Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[190]]),
+    Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[63, 226, 31]]),
+    Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[130, 32]]),
+    Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[255, 255, 255, 255, 255, 1]]),
+    Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[64, 1]])]
+    == [Fail{"no table entry at index 0"}, Fail{"no table entry at index 62"},
+      Fail{"a table size update past the limit"}, Fail{"a table size update after a header"},
+      Fail{"an integer past 2^28"}, Fail{"the header block ends inside a field"}]
+    : List<&2, Result<&2, &2, String, Hp.HSeq>>}
+
+# A header list is capped, each header counting its name, value and 32,
+# so a few indexed bytes cannot expand without bound; so is a string.
+law hpack_list_capped:
+  {[Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 100), [[130, 130, 130]]),
+    Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 10), [[0, 11]])]
+    == [Fail{"the header list is larger than its limit"},
+      Fail{"a string of 11 bytes is longer than the header list's limit"}]
+    : List<&2, Result<&2, &2, String, Hp.HSeq>>}
+
+# A size update shrinks the table at once; growing it back keeps it empty.
+law hpack_size_update_evicts:
+  {Hp.Hp.decode_seq(Hp.Hp.dec_new(4096, 65536), [[64, 1, 97, 1, 98], [32, 63, 225, 31, 130]])
+    == Done{Hp.HSeq{[[H.Header{"a", "b"}], [H.Header{":method", "GET"}]], [], 0}} : Result<&2, &2, String, Hp.HSeq>}
+
+# When the peer shrinks the table and grows it again, the next block
+# signals both, the smallest first, so the tables stay in step.
+law hpack_encoder_signals_resize:
+  {Hp.Hp.encode_seq(Hp.Hp.enc_resize(Hp.Hp.enc_resize(Hp.Hp.enc_new(4096, False{}), 0), 4096),
+    [[H.Header{":method", "GET"}]]) == [[32, 63, 225, 31, 130]] : List<&2, List<&2, U32>>}
