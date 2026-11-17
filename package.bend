@@ -38,6 +38,7 @@ import ./src/stream.bend as Stream
 import ./src/sys.bend as Sys
 import ./src/time.bend as Time
 import ./src/typed.bend as Typed
+import ./src/unz.bend as Unz
 import ./src/utf8.bend as Utf8
 import ./src/watcher.bend as Watcher
 import ./src/webhook.bend as Webhook
