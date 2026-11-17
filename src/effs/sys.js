@@ -31,3 +31,7 @@ io_eff(CID(Sys.memo_put), (key, val, until) => {
 // Unix sockets: the native lane only (sys.c).
 io_eff(CID(Sys.unix_listen), (path, mode) => io_fail(4000, "Unix sockets need the native lane"));
 io_eff(CID(Sys.unix_connect), (path) => io_fail(4000, "Unix sockets need the native lane"));
+
+// A second handle on a connection: the native lane only (sys.c).
+io_eff(CID(Sys.dup), (fd) => io_tup(fd, io_fail(4000, "a second socket handle needs the native lane")));
+io_eff(CID(Sys.shutdown), (fd) => fd);

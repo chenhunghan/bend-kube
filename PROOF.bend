@@ -383,3 +383,33 @@ def Laws.hpack_size_update_evicts():
 
 def Laws.hpack_encoder_signals_resize():
   {==}
+
+def Laws.h2_ping_answered():
+  {==}
+
+def Laws.h2_needs_preface():
+  {==}
+
+def Laws.h2_frame_too_large():
+  {==}
+
+def Laws.h2_window_update_zero():
+  {==}
+
+def Laws.h2_data_on_closed_stream():
+  {==}
+
+def Laws.h2_refuses_past_max_streams():
+  {==}
+
+def Laws.h2_continuation_joins():
+  {==}
+
+def Laws.h2_data_waits_for_window():
+  {==}
+
+def Laws.h2_goaway_refuses_later():
+  {==}
+
+def Laws.h2_no_stream_after_goaway():
+  {==}

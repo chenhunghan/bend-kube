@@ -11,7 +11,8 @@
 #   7. TLS and proxies behave against local servers on both lanes, the
 #      native one under sanitizers (tests/tls.sh; SKIP_TLS=1 skips it);
 #   8. Unix sockets serve and refuse as they should, under sanitizers
-#      (tests/unix.sh).
+#      (tests/unix.sh);
+#   9. HTTP/2 serves Bend's client and curl, under sanitizers (tests/h2.sh).
 # On macOS with a newer SDK than clang's linker knows, set SDKROOT to an
 # older SDK (for example .../MacOSX26.5.sdk).
 set -eu
@@ -29,13 +30,13 @@ out=$(bend PROOF.bend --verdict 2>&1) || true; echo "$out" | tail -1
 echo "$out" | grep -q "ALL PROOFS CHECK" || { echo "$out"; exit 1; }
 
 step "pure modules"
-for m in json utf8 base64 yaml http ws pb hpack core config proxy watcher store queue control cond lease time finalizer typed admission; do
+for m in json utf8 base64 yaml http ws pb hpack h2 core config proxy watcher store queue control cond lease time finalizer typed admission; do
   out=$(bend src/$m.bend --check-only 2>&1) || true
   if echo "$out" | grep -q "ALL PROOFS CHECK"; then echo "ok   $m"; else echo "FAIL $m"; echo "$out"; exit 1; fi
 done
 
 step "IO modules"
-for m in net sys client stream exec log runtime leader serve helpers kube webhook; do
+for m in net sys h2io client stream exec log runtime leader serve helpers kube webhook; do
   out=$(bend src/$m.bend --check-only 2>&1) || true
   # The only acceptable complaint is the foreign effects themselves.
   rest=$(echo "$out" | grep -v "SOME PROOFS FAIL\|rely on unsafe or foreign code\|defs that depend on foreign effects\|^Hint: no law" || true)
@@ -79,4 +80,7 @@ if [ "${SKIP_TLS:-0}" != 1 ]; then
 fi
 step "Unix sockets"
 tests/unix.sh
+
+step "HTTP/2"
+tests/h2.sh
 printf '\nall gates pass\n'

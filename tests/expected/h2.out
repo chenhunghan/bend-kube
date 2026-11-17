@@ -1,0 +1,15 @@
+server: headers 1 [:method=POST, :scheme=http, :path=/x, :authority=h] end=False
+server: data 1 16384 bytes end=False
+server: data 1 16384 bytes end=False
+server: data 1 16384 bytes end=False
+server: data 1 16383 bytes end=False
+server: data 1 4465 bytes end=True
+client: headers 1 [:status=200] end=False
+client: data 1 16384 bytes end=False
+client: data 1 3616 bytes end=False
+client: headers 1 [grpc-status=0] end=True
+server: headers 3 [:method=POST, :scheme=http, :path=/x, :authority=h] end=True
+server: rst 3 code 8
+server: goaway last 0 code 0
+wire bytes 90283
+client over True, server over False

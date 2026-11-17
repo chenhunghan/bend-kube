@@ -15,6 +15,7 @@ import ./src/config.bend as K
 import ./src/admission.bend as A
 import ./src/pb.bend as Pr
 import ./src/hpack.bend as Hp
+import ./src/h2.bend as Tw
 
 # LAWS
 # ====
@@ -927,3 +928,74 @@ law hpack_size_update_evicts:
 law hpack_encoder_signals_resize:
   {Hp.Hp.encode_seq(Hp.Hp.enc_resize(Hp.Hp.enc_resize(Hp.Hp.enc_new(4096, False{}), 0), 4096),
     [[H.Header{":method", "GET"}]]) == [[32, 63, 225, 31, 130]] : List<&2, List<&2, U32>>}
+
+# HTTP/2 (RFC 9113)
+# -----------------
+
+# A server answers the preface's SETTINGS with an ACK and a PING with a
+# PING ACK carrying the same 8 bytes, after its own SETTINGS (100 streams,
+# 1 MiB windows and header list) and a WINDOW_UPDATE raising the
+# connection's window to 16 MiB.
+law h2_ping_answered:
+  {Tw.H2.take_bytes(Tw.H2.take(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(True{})), List.concat(&2, U32, [[80, 82, 73, 32, 42, 32, 72, 84, 84, 80, 47, 50, 46, 48, 13, 10, 13, 10, 83, 77, 13, 10, 13, 10], [0, 0, 0, 4, 0, 0, 0, 0, 0], [0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]]))))
+    == List.concat(&2, U32, [[0, 0, 18, 4, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 100, 0, 4, 0, 16, 0, 0, 0, 6, 0, 16, 0, 0, 0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 255, 0, 1], [0, 0, 0, 4, 1, 0, 0, 0, 0], [0, 0, 8, 6, 1, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]]) : List<&2, U32>}
+
+# A server refuses a client that does not open with the preface.
+law h2_needs_preface:
+  {Tw.H2.take_evs(Tw.H2.take(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(True{})), [71, 69, 84, 32, 47])))
+    == [Tw.EvFatal{1, "no HTTP/2 connection preface"}] : List<&2, Tw.H2Ev>}
+
+# A frame past SETTINGS_MAX_FRAME_SIZE (16384, which we never raise) is a
+# FRAME_SIZE_ERROR.
+law h2_frame_too_large:
+  {Tw.H2.take_evs(Tw.H2.take(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(True{})), List.concat(&2, U32, [[80, 82, 73, 32, 42, 32, 72, 84, 84, 80, 47, 50, 46, 48, 13, 10, 13, 10, 83, 77, 13, 10, 13, 10], [0, 64, 1, 0, 0, 0, 0, 0, 1]]))))
+    == [Tw.EvFatal{6, "a frame of 16385 bytes is past SETTINGS_MAX_FRAME_SIZE"}] : List<&2, Tw.H2Ev>}
+
+# A WINDOW_UPDATE of 0 on the connection is a PROTOCOL_ERROR.
+law h2_window_update_zero:
+  {Tw.H2.take_evs(Tw.H2.take(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(True{})), List.concat(&2, U32, [[80, 82, 73, 32, 42, 32, 72, 84, 84, 80, 47, 50, 46, 48, 13, 10, 13, 10, 83, 77, 13, 10, 13, 10], [0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]]))))
+    == [Tw.EvFatal{1, "a WINDOW_UPDATE of 0"}] : List<&2, Tw.H2Ev>}
+
+# DATA on a stream no one opened is reset with STREAM_CLOSED.
+law h2_data_on_closed_stream:
+  {Tw.H2.take_evs(Tw.H2.take(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(True{})), List.concat(&2, U32, [[80, 82, 73, 32, 42, 32, 72, 84, 84, 80, 47, 50, 46, 48, 13, 10, 13, 10, 83, 77, 13, 10, 13, 10], [0, 0, 1, 0, 0, 0, 0, 0, 1, 7]]))))
+    == [Tw.EvRst{1, 5}] : List<&2, Tw.H2Ev>}
+
+# A request (HEADERS with END_STREAM) opens a stream; one past
+# SETTINGS_MAX_CONCURRENT_STREAMS is refused with REFUSED_STREAM.
+law h2_refuses_past_max_streams:
+  {Tw.H2.take_evs(Tw.H2.take(Tw.H2.feed(Tw.H2.new(Tw.H2Cfg{True{}, 16384, 1048576, 16777216, 1, 1048576}),
+    List.concat(&2, U32, [[80, 82, 73, 32, 42, 32, 72, 84, 84, 80, 47, 50, 46, 48, 13, 10, 13, 10, 83, 77, 13, 10, 13, 10], [0, 0, 3, 1, 4, 0, 0, 0, 1, 130, 132, 134], [0, 0, 3, 1, 4, 0, 0, 0, 3, 130, 132, 134]]))))
+    == [Tw.EvHeaders{1, [H.Header{":method", "GET"}, H.Header{":path", "/"}, H.Header{":scheme", "http"}], False{}},
+      Tw.EvRst{3, 7}] : List<&2, Tw.H2Ev>}
+
+# A header block split over HEADERS and CONTINUATION is one block; any
+# other frame inside it is a PROTOCOL_ERROR.
+law h2_continuation_joins:
+  {[Tw.H2.take_evs(Tw.H2.take(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(True{})),
+      List.concat(&2, U32, [[80, 82, 73, 32, 42, 32, 72, 84, 84, 80, 47, 50, 46, 48, 13, 10, 13, 10, 83, 77, 13, 10, 13, 10], [0, 0, 1, 1, 1, 0, 0, 0, 1, 130], [0, 0, 2, 9, 4, 0, 0, 0, 1, 132, 134]])))),
+    Tw.H2.take_evs(Tw.H2.take(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(True{})),
+      List.concat(&2, U32, [[80, 82, 73, 32, 42, 32, 72, 84, 84, 80, 47, 50, 46, 48, 13, 10, 13, 10, 83, 77, 13, 10, 13, 10], [0, 0, 1, 1, 1, 0, 0, 0, 1, 130], [0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]]))))]
+    == [[Tw.EvHeaders{1, [H.Header{":method", "GET"}, H.Header{":path", "/"}, H.Header{":scheme", "http"}], True{}}],
+      [Tw.EvFatal{1, "a frame inside a header block"}]] : List<&2, List<&2, Tw.H2Ev>>}
+
+# DATA waits for the windows: after the peer's SETTINGS_INITIAL_WINDOW_SIZE
+# of 10, 100 bytes send 10 (the connection's window, 65535, keeps the
+# rest); a WINDOW_UPDATE of 5 on the stream sends 5 more.
+law h2_data_waits_for_window:
+  {[Tw.H2.csw_of(Tw.H2.send(Tw.H2.opened(Tw.H2.open(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(False{})), [0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 10]),
+      [H.Header{":method", "POST"}], False{})), 1, Tw.CData{List.replicate(U32, 100n, 0), True{}})),
+    Tw.H2.csw_of(Tw.H2.feed(Tw.H2.send(Tw.H2.opened(Tw.H2.open(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(False{})), [0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 10]),
+      [H.Header{":method", "POST"}], False{})), 1, Tw.CData{List.replicate(U32, 100n, 0), True{}}),
+      [0, 0, 4, 8, 0, 0, 0, 0, 1, 0, 0, 0, 5]))] == [65525, 65520] : List<&2, U32>}
+
+# A GOAWAY refuses our streams past its last id, and no stream opens after.
+law h2_goaway_refuses_later:
+  {Tw.H2.take_evs(Tw.H2.take(Tw.H2.feed(Tw.H2.opened(Tw.H2.open(Tw.H2.opened(Tw.H2.open(Tw.H2.new(Tw.H2.cfg(False{})),
+      [H.Header{":method", "GET"}], True{})), [H.Header{":method", "GET"}], True{})),
+      [0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0])))
+    == [Tw.EvGoaway{1, 0}, Tw.EvRst{3, 7}] : List<&2, Tw.H2Ev>}
+
+law h2_no_stream_after_goaway:
+  {Tw.H2.opened_sid(Tw.H2.open(Tw.H2.feed(Tw.H2.new(Tw.H2.cfg(False{})), [0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+      [H.Header{":method", "GET"}], True{})) == 0 : U32}

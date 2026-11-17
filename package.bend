@@ -14,6 +14,8 @@ import ./src/control.bend as Control
 import ./src/core.bend as Core
 import ./src/exec.bend as Exec
 import ./src/finalizer.bend as Finalizer
+import ./src/h2.bend as H2
+import ./src/h2io.bend as H2io
 import ./src/helpers.bend as Helpers
 import ./src/hpack.bend as Hpack
 import ./src/http.bend as Http

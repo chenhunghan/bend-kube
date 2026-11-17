@@ -305,3 +305,34 @@ static void __attribute__((constructor)) sys_unix_connect_use(void) {
   io_eff(CID(Sys.unix_connect), sys_unix_connect_run);
 }
 #endif
+
+// Sys.dup(sock): a second handle on sock's connection (dup(2)), so one
+// computation can read while another writes, each owning its handle. The
+// connection lasts until both are closed; Sys.shutdown ends it for both.
+Term sys_dup_run(Env e, Term* f, IoWork* w) {
+  int fd = (int)io_hand_v(f[0]);
+  int got = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+  uint32_t code = (uint32_t)errno;
+  return io_tup(e, io_hand(fd), got < 0 ? io_fail(e, code, NULL) : io_done(e, io_hand(got)));
+}
+
+#ifdef CID(Sys.dup)
+static void __attribute__((constructor)) sys_dup_use(void) {
+  io_eff(CID(Sys.dup), sys_dup_run);
+}
+#endif
+
+// Sys.shutdown(sock): shutdown(2) both ways, which wakes a computation
+// reading the connection on another handle (its recv ends). The handle
+// stays open until closed.
+Term sys_shutdown_run(Env e, Term* f, IoWork* w) {
+  int fd = (int)io_hand_v(f[0]);
+  shutdown(fd, SHUT_RDWR);
+  return io_hand(fd);
+}
+
+#ifdef CID(Sys.shutdown)
+static void __attribute__((constructor)) sys_shutdown_use(void) {
+  io_eff(CID(Sys.shutdown), sys_shutdown_run);
+}
+#endif

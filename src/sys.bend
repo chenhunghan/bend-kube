@@ -75,3 +75,16 @@ def Sys.unix_listen(path: String, mode: U32) -> IO(Result<&1, &1, U32 & String, 
 def Sys.unix_connect(path: String) -> IO(Result<&1, &1, U32 & String, Socket>):
   import "./effs/sys.c"
   import "./effs/sys.js"
+
+# A second handle on sock's connection (dup(2)): one computation reads
+# while another writes, each owning a handle. The connection lasts until
+# both are closed; Sys.shutdown ends it for both.
+def Sys.dup(sock: Socket) -> IO(Socket & Result<&1, &1, U32 & String, Socket>):
+  import "./effs/sys.c"
+  import "./effs/sys.js"
+
+# shutdown(2) both ways: a recv on any handle of the connection ends. The
+# handle stays open until closed.
+def Sys.shutdown(sock: Socket) -> IO(Socket):
+  import "./effs/sys.c"
+  import "./effs/sys.js"
