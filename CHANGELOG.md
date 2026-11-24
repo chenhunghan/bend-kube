@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0](https://github.com/chenhunghan/bend-kube/compare/v0.10.0...v0.11.0) (2026-11-24)
+
+
+### Features
+
+* hash what Unz.file writes (Unz.file_sha256) ([ef97dcd](https://github.com/chenhunghan/bend-kube/commit/ef97dcd740a66bca489d8b52d9d65ec2ab835471))
+* Tls.available, and OpenSSL loads that retry after a failure ([b17b1b4](https://github.com/chenhunghan/bend-kube/commit/b17b1b415ad4690efc56793bb2c7ddf8099e5b7c))
+
 ## [0.10.0](https://github.com/chenhunghan/bend-kube/compare/v0.9.0...v0.10.0) (2026-11-17)
 
 
