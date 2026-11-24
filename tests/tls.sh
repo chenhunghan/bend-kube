@@ -64,17 +64,27 @@ clang -std=c11 -O0 -g -fno-omit-frame-pointer -fsanitize="$SANITIZE" -fno-saniti
 pass "native probe with -fsanitize=$SANITIZE"
 
 echo "== native: loading OpenSSL"
+# The leaks LeakSanitizer reports, but for the one Bend's runtime makes on
+# purpose: main's argument array, allocated by main itself, kept for the
+# process's life.
+leaks() {
+  awk '/^(Direct|Indirect) leak/ { head = $0; getline; getline; if ($0 !~ / in main /) print head }'
+}
 # avail_want NAME WANT CRYPTO SSL [VAR=VALUE...]: tls_avail's three lines,
 # joined by "|", are WANT (a regex)
 avail_want() {
   local name=$1 re=$2 crypto=$3 ssl=$4; shift 4
   local out; out=$(env -u BEND_KUBE_LIBCRYPTO -u BEND_KUBE_LIBSSL "$@" "$work/avail" "$crypto" "$ssl" 2>&1 || true)
-  if printf '%s\n' "$out" | grep -E "ERROR: AddressSanitizer|runtime error" >/dev/null; then
-    fail "native: $name: sanitizer report"; printf '%s\n' "$out" | head -20
-  elif [ "$(printf '%s\n' "$out" | paste -sd'|' -)" != "" ] && printf '%s\n' "$out" | paste -sd'|' - | grep -Eq -- "$re"; then
+  # as in want: any sanitizer report fails, but for main's argument array
+  # (leaks), and only the probe's own lines are matched
+  local got; got=$(printf '%s\n' "$out" | grep -E '^[0-9] (ok|fail)' | paste -sd'|' -)
+  if printf '%s\n' "$out" | grep -E "ERROR: AddressSanitizer|runtime error" >/dev/null \
+    || [ -n "$(printf '%s\n' "$out" | leaks)" ]; then
+    fail "native: $name: sanitizer report"; printf '%s\n' "$out" | grep -v WARNING | head -30
+  elif [ -n "$got" ] && printf '%s\n' "$got" | grep -Eq -- "$re"; then
     pass "native: $name"
   else
-    fail "native: $name: wanted /$re/, got: $(printf '%s\n' "$out" | paste -sd'|' -)"
+    fail "native: $name: wanted /$re/, got: $got"
   fi
 }
 missing='TLS: OpenSSL not found \(set BEND_KUBE_LIBSSL and BEND_KUBE_LIBCRYPTO\)'
@@ -131,12 +141,6 @@ run() {
   [ "$lane" = js ] && cmd=(bend tests/fixtures/tls_probe.bend)
   env -u HTTPS_PROXY -u https_proxy -u NO_PROXY -u no_proxy PROBE_CA="$(cat $W/ca.crt)" "$@" \
     perl -e 'alarm shift; exec @ARGV' 20 "${cmd[@]}" "$host" "$port" 2>&1 || true
-}
-# The leaks LeakSanitizer reports, but for the one Bend's runtime makes on
-# purpose: main's argument array, allocated by main itself, kept for the
-# process's life.
-leaks() {
-  awk '/^(Direct|Indirect) leak/ { head = $0; getline; getline; if ($0 !~ / in main /) print head }'
 }
 # want LANE NAME REGEX HOST PORT [VAR=VALUE...]
 want() {
