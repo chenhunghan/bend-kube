@@ -2,10 +2,11 @@ import Base
 import ../../src/unz.bend as Z
 
 # Decompresses a file straight into another, for tests/unz.sh:
-#   unz_file sink|file gzip|zstd IN OUT [MAX]
+#   unz_file sink|file|sha gzip|zstd IN OUT [MAX]
 # sink: 64 KiB chunks through Unz.sink and Unz.write (MAX: the most one
 # write may put out, 256 MiB unless given); file: Unz.file at once (MAX
-# in MiB, no limit unless given). Prints "ok BYTES" or the failure.
+# in MiB, no limit unless given); sha: Unz.file_sha256, as file. Prints
+# "ok BYTES" ("ok BYTES HEX" for sha) or the failure.
 
 type Ev is Type:
   ERead{id: U32, f: File, r: Result<&1, &1, U32 & String, List<&2, U32>>}
@@ -94,6 +95,13 @@ def whole(r: Result<&1, &1, U32 & String, U32 & U32>) -> String:
     case Fail{(c, m)}:
       "fail " ++ m
 
+def shaed(r: Result<&1, &1, U32 & String, (U32 & U32) & String>) -> String:
+  match r:
+    case Done{(n, hex)}:
+      whole(Done{n}) ++ " " ++ hex
+    case Fail{(c, m)}:
+      "fail " ++ m
+
 def main.mode(file: Bool, kind: U32, +inp: String, +out: String, +max: Maybe<&2, U32>) -> IO(Unit):
   match file:
     case True{}:
@@ -101,14 +109,21 @@ def main.mode(file: Bool, kind: U32, +inp: String, +out: String, +max: Maybe<&2,
     case False{}:
       IO.bind(Result<&1, &1, U32 & String, U32>, Unit, Z.Unz.open(kind), r => opened(r, inp, out, Maybe.default(&2, U32, max, 268435456)))
 
+def main.sha(sha: Bool, +file: Bool, kind: U32, +inp: String, +out: String, +max: Maybe<&2, U32>) -> IO(Unit):
+  match sha:
+    case True{}:
+      IO.bind(Result<&1, &1, U32 & String, (U32 & U32) & String>, Unit, Z.Unz.file_sha256(kind, inp, out, Maybe.default(&2, U32, max, 0)), r => IO.print(shaed(r)))
+    case False{}:
+      main.mode(file, kind, inp, out, max)
+
 def main.go(args: List<String>) -> IO(Unit):
   match args:
     case [p, +mode, +kind, inp, out]:
-      main.mode(String.eq(mode, "file"), kind_of(String.eq(kind, "zstd")), inp, out, None{})
+      main.sha(String.eq(mode, "sha"), String.eq(mode, "file"), kind_of(String.eq(kind, "zstd")), inp, out, None{})
     case [p, +mode, +kind, inp, out, max]:
-      main.mode(String.eq(mode, "file"), kind_of(String.eq(kind, "zstd")), inp, out, U32.read(max))
+      main.sha(String.eq(mode, "sha"), String.eq(mode, "file"), kind_of(String.eq(kind, "zstd")), inp, out, U32.read(max))
     case _:
-      IO.print("usage: unz_file sink|file gzip|zstd IN OUT [MAX]")
+      IO.print("usage: unz_file sink|file|sha gzip|zstd IN OUT [MAX]")
 
 def main() -> IO(Unit):
   do IO<Unit>:

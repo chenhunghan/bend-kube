@@ -32,6 +32,13 @@ import Base
 # which writes dst (0644), fsyncs it and answers its size in two 32-bit
 # halves; past max_mib MiB of output (0: no limit), bad data, or input
 # that ends early fails and removes dst.
+#
+#   ((hi, lo), hex) <- Unz.file_sha256(Unz.gzip(), src, dst, max_mib)
+#
+# is Unz.file that also hashes the bytes as it writes them: hex is the
+# SHA-256 of dst's contents, 64 lowercase digits (a layer's diffID, with
+# no second read of the tar). The hash is computed here, in C, so it
+# needs no OpenSSL. A failure removes dst and answers no digest.
 
 def Unz.gzip() -> U32:
   0
@@ -60,5 +67,9 @@ def Unz.write(id: U32, bytes: List<&2, U32>, max: U32) -> IO(Result<&1, &1, U32 
   import "./effs/unz.js"
 
 def Unz.file(kind: U32, src: String, dst: String, max_mib: U32) -> IO(Result<&1, &1, U32 & String, U32 & U32>):
+  import "./effs/unz.c"
+  import "./effs/unz.js"
+
+def Unz.file_sha256(kind: U32, src: String, dst: String, max_mib: U32) -> IO(Result<&1, &1, U32 & String, (U32 & U32) & String>):
   import "./effs/unz.c"
   import "./effs/unz.js"
