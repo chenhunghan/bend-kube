@@ -33,4 +33,7 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/link":
             names[body["name"] + "@" + body["version"]] = next(k for k in pkgs if k.startswith(body["hash"]))
         self.send(200, "{}", "application/json")
+# bend fetches a package's files all at once; macOS drops connections past
+# the listen backlog (socketserver's default is 5), which reads as a bad file
+ThreadingHTTPServer.request_queue_size = 128
 ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
