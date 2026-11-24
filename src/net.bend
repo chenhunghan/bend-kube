@@ -67,6 +67,18 @@ def Tls.accept(sock: Socket, cert: String, key: String, ms: U32) -> IO(Res(Socke
   import "./effs/tls.c"
   import "./effs/tls.js"
 
+# Whether TLS works here, opening nothing: loads OpenSSL (libssl and
+# libcrypto, by dlopen; BEND_KUBE_LIBSSL and BEND_KUBE_LIBCRYPTO name them)
+# unless it is loaded already. Fails with ENOTSUP (95 on Linux, 45 on
+# macOS) and the loader's reason, such as "TLS: OpenSSL not found (set
+# BEND_KUBE_LIBSSL and BEND_KUBE_LIBCRYPTO)". A failure is not remembered:
+# a later call (or Tls.secure, Tls.accept) searches again, so setting the
+# variables or installing OpenSSL after a failure takes effect. Always
+# Done on the JavaScript lane.
+def Tls.available() -> IO(Res(Unit)):
+  import "./effs/tls.c"
+  import "./effs/tls.js"
+
 # Opening
 # -------
 
