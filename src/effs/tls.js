@@ -203,6 +203,8 @@ io_eff(CID(Tls.send), tls_send);
 io_eff(CID(Tls.send_bytes), tls_send_bytes);
 io_eff(CID(Tls.recv), tls_recv);
 io_eff(CID(Tls.close), tls_close);
+// node:tls is always there.
+io_eff(CID(Tls.available), () => io_done({ $: CID(Unit) }));
 
 // The server side of TLS (webhooks) runs on the native lane only: an
 // accepted socket belongs to the main thread, out of the TLS worker's reach.

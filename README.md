@@ -672,7 +672,9 @@ kubectl apply -f deploy/mirror.yaml
   every upgrade.
 - **OpenSSL:** it is loaded at run time (`libssl.so.3` or `.1.1`, or
   Homebrew's on macOS). Set `BEND_KUBE_LIBSSL` and `BEND_KUBE_LIBCRYPTO` to
-  override where it is found.
+  override where it is found. `Tls.available()` loads it without opening
+  a connection and says why it cannot. A failed load is tried again on the
+  next call, so the variables may be set after it; a successful one stays.
 - **macOS SDK:** if clang's linker rejects the newest SDK, set `SDKROOT` to
   an older SDK.
 - **`src/` changes:** run `tools/order.py FILE` after editing. Bend binds a

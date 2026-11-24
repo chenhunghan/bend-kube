@@ -2,7 +2,10 @@
 # Tests net.bend's TLS and proxy handling against local servers, on both
 # lanes: openssl s_server (good, wrong CA, wrong name, expired, TLS 1.1,
 # client certificates), misbehaving servers (fixtures/tls_bad.py) and a
-# CONNECT proxy (fixtures/connect_proxy.py). No cluster needed.
+# CONNECT proxy (fixtures/connect_proxy.py). No cluster needed. Also
+# OpenSSL's loader (fixtures/tls_avail.bend: Tls.available, a failure
+# retried within one process, a success kept) and, on macOS, the system's
+# LibreSSL through the same checks.
 #
 # The native lane is built with sanitizers: SANITIZE (default
 # address,undefined on Linux, undefined on macOS, whose ASan runtime hangs
@@ -53,7 +56,48 @@ bend tests/fixtures/tls_probe.bend -o "$work/probe.c" > "$work/build.log" 2>&1 \
 clang -std=c11 -O0 -g -fno-omit-frame-pointer -fsanitize="$SANITIZE" -fno-sanitize-recover=all \
   "$work/probe.c" -lpthread -lm -o "$work/probe" > "$work/build.log" 2>&1 \
   || { grep -v "warning\|note:\|^ " "$work/build.log" | tail -20; exit 1; }
+bend tests/fixtures/tls_avail.bend -o "$work/avail.c" > "$work/build.log" 2>&1 \
+  || { cat "$work/build.log"; exit 1; }
+clang -std=c11 -O0 -g -fno-omit-frame-pointer -fsanitize="$SANITIZE" -fno-sanitize-recover=all \
+  "$work/avail.c" -lpthread -lm -o "$work/avail" > "$work/build.log" 2>&1 \
+  || { grep -v "warning\|note:\|^ " "$work/build.log" | tail -20; exit 1; }
 pass "native probe with -fsanitize=$SANITIZE"
+
+echo "== native: loading OpenSSL"
+# avail_want NAME WANT CRYPTO SSL [VAR=VALUE...]: tls_avail's three lines,
+# joined by "|", are WANT (a regex)
+avail_want() {
+  local name=$1 re=$2 crypto=$3 ssl=$4; shift 4
+  local out; out=$(env -u BEND_KUBE_LIBCRYPTO -u BEND_KUBE_LIBSSL "$@" "$work/avail" "$crypto" "$ssl" 2>&1 || true)
+  if printf '%s\n' "$out" | grep -E "ERROR: AddressSanitizer|runtime error" >/dev/null; then
+    fail "native: $name: sanitizer report"; printf '%s\n' "$out" | head -20
+  elif [ "$(printf '%s\n' "$out" | paste -sd'|' -)" != "" ] && printf '%s\n' "$out" | paste -sd'|' - | grep -Eq -- "$re"; then
+    pass "native: $name"
+  else
+    fail "native: $name: wanted /$re/, got: $(printf '%s\n' "$out" | paste -sd'|' -)"
+  fi
+}
+missing='TLS: OpenSSL not found \(set BEND_KUBE_LIBSSL and BEND_KUBE_LIBCRYPTO\)'
+avail_want "Tls.available finds OpenSSL" '^1 ok\|2 ok\|3 ok$' "" ""
+avail_want "Tls.available without OpenSSL says why" "^1 fail $missing\|2 fail $missing\|3 fail $missing\$" \
+  /nonexistent /nonexistent BEND_KUBE_LIBCRYPTO=/nonexistent
+avail_want "a failed load is retried: the search after unsetting the variable finds it" \
+  "^1 fail $missing\|2 ok\|3 ok\$" "" "" BEND_KUBE_LIBCRYPTO=/nonexistent
+avail_want "a load that succeeded stays, whatever the variables say later" '^1 ok\|2 ok\|3 ok$' \
+  /nonexistent /nonexistent
+# the same retry, to libraries named by path
+case "$(uname)" in
+  Darwin) d=""; for p in /opt/homebrew/opt/openssl@3/lib /usr/local/opt/openssl@3/lib; do
+            [ -e "$p/libssl.3.dylib" ] && { d=$p; break; }; done
+          lc=${d:+$d/libcrypto.3.dylib}; ls=${d:+$d/libssl.3.dylib};;
+  *) lc=libcrypto.so.3; ls=libssl.so.3;;
+esac
+if [ -n "$lc" ]; then
+  avail_want "a failed load is retried: variables set after it name the libraries" \
+    "^1 fail $missing\|2 ok\|3 ok\$" "$lc" "$ls" BEND_KUBE_LIBCRYPTO=/nonexistent BEND_KUBE_LIBSSL=/nonexistent
+else
+  echo "skip native: no OpenSSL 3 found by path"
+fi
 
 echo "== servers"
 srv() {  # srv PORT ARGS...: an s_server that answers GETs with a status page
@@ -156,6 +200,23 @@ for lane in native js; do
   want $lane "proxy down" '^error: proxy: ' bend.test 24401 "HTTPS_PROXY=127.0.0.1:24498"
 done
 
+# macOS's own LibreSSL (private to Apple, but dlopen-able): with
+# SSL_CTX_set_options optional, the loader takes it, and it must verify as
+# strictly as OpenSSL
+LIBRE=(BEND_KUBE_LIBCRYPTO=/usr/lib/libcrypto.46.dylib BEND_KUBE_LIBSSL=/usr/lib/libssl.48.dylib)
+if [ "$(uname)" = Darwin ] && [ "$(env "${LIBRE[@]}" "$work/avail" "" "" 2>/dev/null | head -1)" = "1 ok" ]; then
+  echo "== native: macOS's LibreSSL"
+  want native "LibreSSL: verified server" '^ok HTTP/1.0 200' 127.0.0.1 24401 "${LIBRE[@]}"
+  want native "LibreSSL: unknown CA rejected" 'server certificate rejected' 127.0.0.1 24401 "$OTHER" "${LIBRE[@]}"
+  want native "LibreSSL: wrong name rejected" 'server certificate rejected' 127.0.0.1 24402 "${LIBRE[@]}"
+  want native "LibreSSL: a name only in the CN is not taken" '^error' 127.0.0.1 24415 "PROBE_SERVER_NAME=bend.test" "${LIBRE[@]}"
+  want native "LibreSSL: expired certificate rejected" 'server certificate rejected' 127.0.0.1 24403 "${LIBRE[@]}"
+  want native "LibreSSL: TLS 1.1 refused" '^error: TLS' 127.0.0.1 24404 "${LIBRE[@]}"
+  want native "LibreSSL: client certificate accepted" '^ok HTTP/1.0 200' 127.0.0.1 24405 "$CERT" "$KEY" "${LIBRE[@]}"
+else
+  echo "skip native: macOS's LibreSSL (not macOS, or /usr/lib/libssl.48.dylib does not load)"
+fi
+
 echo "== native: TLS server (webhooks)"
 bend examples/webhook.bend -o "$work/webhook.c" > "$work/build.log" 2>&1 || { cat "$work/build.log"; exit 1; }
 clang -std=c11 -O0 -g -fno-omit-frame-pointer -fsanitize="$SANITIZE" -fno-sanitize-recover=all \
@@ -174,6 +235,12 @@ else
   echo "skip native: IPv6 (no ::1 here)"
 fi
 echo | "$OPENSSL" s_client -connect 127.0.0.1:24420 -tls1_1 >/dev/null 2>&1 && fail "native: webhook took TLS 1.1" || pass "native: webhook refuses TLS 1.1"
+# renego PORT: s_client asks to renegotiate (R) over TLS 1.2, then GETs
+renego() {
+  { printf 'R\n'; sleep 1.5; printf 'GET / HTTP/1.0\r\n\r\n'; sleep 1; } \
+    | "$OPENSSL" s_client -connect "127.0.0.1:$1" -tls1_2 -servername bend.test -CAfile $W/ca.crt 2>&1 || true
+}
+renego 24420 | grep -q "no renegotiation" && pass "native: webhook refuses renegotiation" || fail "native: webhook renegotiated"
 [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:24420/validate || true)" = 000 ] \
   && pass "native: plain HTTP on the webhook's port gets no answer" || fail "native: plain HTTP answered"
 python3 -I -c "import socket; s = socket.create_connection(('127.0.0.1', 24420)); s.send(b'\x16\x03\x01\x00\xff'); s.close()"
@@ -220,6 +287,20 @@ if grep -E "ERROR: AddressSanitizer|runtime error" "$work/webhook.log" >/dev/nul
   fail "native: webhook: sanitizer report"; grep -v WARNING "$work/webhook.log" | head -30
 else
   pass "native: webhook server ran clean under -fsanitize=$SANITIZE"
+fi
+if [ "$(uname)" = Darwin ] && [ "$(env "${LIBRE[@]}" "$work/avail" "" "" 2>/dev/null | head -1)" = "1 ok" ]; then
+  env "${LIBRE[@]}" WEBHOOK_PORT=24422 WEBHOOK_CERT=$W/server.crt WEBHOOK_KEY=$W/server.key "$work/webhook" > "$work/webhook-libre.log" 2>&1 &
+  wl_pid=$!
+  for _ in $(seq 1 50); do grep -q '"webhooks serving"' "$work/webhook-libre.log" && break; sleep 0.1; done
+  review l1 forbidden | curl -s -m 10 --cacert $W/ca.crt --resolve bend.test:24422:127.0.0.1 https://bend.test:24422/validate --data-binary @- \
+    | grep -q '"uid":"l1","allowed":false' && pass "native: LibreSSL: the webhook answers" || fail "native: LibreSSL: webhook answer"
+  echo | "$OPENSSL" s_client -connect 127.0.0.1:24422 -tls1_1 >/dev/null 2>&1 && fail "native: LibreSSL: webhook took TLS 1.1" \
+    || pass "native: LibreSSL: webhook refuses TLS 1.1"
+  renego 24422 | grep -q "no renegotiation" && pass "native: LibreSSL: webhook refuses renegotiation" \
+    || fail "native: LibreSSL: webhook renegotiated"
+  kill "$wl_pid"; wait "$wl_pid" 2>/dev/null || true
+  grep -E "ERROR: AddressSanitizer|runtime error" "$work/webhook-libre.log" >/dev/null \
+    && fail "native: LibreSSL: webhook: sanitizer report" || pass "native: LibreSSL: webhook ran clean"
 fi
 echo "== js: TLS server"
 WEBHOOK_PORT=24421 WEBHOOK_CERT=$W/server.crt WEBHOOK_KEY=$W/server.key bend examples/webhook.bend > "$work/webhook-js.log" 2>&1 &

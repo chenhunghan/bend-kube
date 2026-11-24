@@ -17,7 +17,10 @@
 // Bend (proxy.bend), not here.
 //
 // BEND_KUBE_LIBSSL and BEND_KUBE_LIBCRYPTO name the libraries when the
-// default search misses them.
+// default search misses them. A failed load is not remembered: the next
+// call searches again, so a variable set, or a library installed, after a
+// failure takes effect. A load that succeeded stays. Tls.available loads
+// them without opening anything, to say up front whether TLS will work.
 
 #include <dlfcn.h>
 #include <netdb.h>
@@ -41,7 +44,7 @@ typedef struct {
   int           (*ctx_use_key)(void*, void*);
   int           (*ctx_check_key)(void*);
   int           (*ctx_alpn)(void*, const unsigned char*, unsigned);
-  uint64_t      (*ctx_options)(void*, uint64_t);
+  uint64_t      (*ctx_options)(void*, uint64_t);  // NULL in LibreSSL (a macro there)
   void*         (*ssl_new)(void*);
   void          (*ssl_free)(void*);
   int           (*ssl_set_fd)(void*, int);
@@ -69,10 +72,11 @@ typedef struct {
   unsigned long (*err_get)(void);
   void          (*err_text)(unsigned long, char*, size_t);
   void          (*err_clear)(void);
+  const char*   (*version)(int);  // OpenSSL_version, optional
 } TlsLib;
 
 static TlsLib          tls_lib;
-static int             tls_ready;  // 0 untried, 1 loaded, -1 missing
+static int             tls_ready;  // 1 loaded, else not (yet): tried again each call
 static char            tls_why[256];
 static pthread_mutex_t tls_gate = PTHREAD_MUTEX_INITIALIZER;
 static void*           tls_conn[65536];  // an SSL*, TLS_PLAIN, or NULL
@@ -86,7 +90,11 @@ static void*           tls_conn[65536];  // an SSL*, TLS_PLAIN, or NULL
 #define TLS_WANT_READ          2
 #define TLS_WANT_WRITE         3
 #define TLS_ZERO_RETURN        6
-#define TLS_OP_NO_RENEGOTIATION 0x40000000U
+#define TLS_OP_NO_RENEGOTIATION 0x40000000U  // OpenSSL's bit
+#define TLS_CTRL_OPTIONS       32           // SSL_CTX_set_options, as LibreSSL's macro has it
+// LibreSSL's NO_CLIENT_RENEGOTIATION and NO_RENEGOTIATION (OpenSSL's
+// 0x40000000 is its NO_DTLSv1); macOS's LibreSSL 3.3 honors only the first.
+#define TLS_OP_NO_RENEG_LIBRE  0x00060000U
 #define TLS_NEVER_CHECK_SUBJECT 0x20
 
 static void* tls_open_lib(const char* env, const char* const* names) {
@@ -106,7 +114,7 @@ static void* tls_open_lib(const char* env, const char* const* names) {
 #define TLS_SYM(h, field, name) \
   if ((*(void**)&tls_lib.field = dlsym(h, name)) == NULL) { \
     snprintf(tls_why, sizeof tls_why, "TLS: %s is missing", name); \
-    return -1; \
+    goto missing; \
   }
 
 static int tls_load_now(void) {
@@ -125,7 +133,7 @@ static int tls_load_now(void) {
   if (s == NULL) {
     snprintf(tls_why, sizeof tls_why,
       "TLS: OpenSSL not found (set BEND_KUBE_LIBSSL and BEND_KUBE_LIBCRYPTO)");
-    return -1;
+    goto missing;
   }
   TLS_SYM(s, init_ssl, "OPENSSL_init_ssl");
   TLS_SYM(s, client_method, "TLS_client_method");
@@ -140,7 +148,6 @@ static int tls_load_now(void) {
   TLS_SYM(s, ctx_use_key, "SSL_CTX_use_PrivateKey");
   TLS_SYM(s, ctx_check_key, "SSL_CTX_check_private_key");
   TLS_SYM(s, ctx_alpn, "SSL_CTX_set_alpn_protos");
-  TLS_SYM(s, ctx_options, "SSL_CTX_set_options");
   TLS_SYM(s, ssl_new, "SSL_new");
   TLS_SYM(s, ssl_free, "SSL_free");
   TLS_SYM(s, ssl_set_fd, "SSL_set_fd");
@@ -168,18 +175,52 @@ static int tls_load_now(void) {
   TLS_SYM(c, err_get, "ERR_get_error");
   TLS_SYM(c, err_text, "ERR_error_string_n");
   TLS_SYM(c, err_clear, "ERR_clear_error");
+  *(void**)&tls_lib.version = dlsym(c, "OpenSSL_version");
+  // SSL_CTX_set_options is a function in OpenSSL 1.1.1 and 3, a macro over
+  // SSL_CTX_ctrl in LibreSSL, whose option bits differ: only LibreSSL,
+  // known by its version text, may go without it (tls_no_reneg).
+  *(void**)&tls_lib.ctx_options = dlsym(s, "SSL_CTX_set_options");
+  if (tls_lib.ctx_options == NULL
+      && (tls_lib.version == NULL || strncmp(tls_lib.version(0), "LibreSSL", 8) != 0)) {
+    snprintf(tls_why, sizeof tls_why, "TLS: SSL_CTX_set_options is missing");
+    goto missing;
+  }
   tls_lib.init_ssl(0, NULL);
+  tls_why[0] = 0;
   return 1;
+missing:
+  // Let go of what did load, so the next try starts clean.
+  if (s != NULL) {
+    dlclose(s);
+  }
+  if (c != NULL) {
+    dlclose(c);
+  }
+  return -1;
 }
 
-static int tls_load(void) {
+// Loads OpenSSL unless it already is: 1 when it is; else -1, with why
+// (when not NULL) set to the reason. A failure is tried again next time.
+static int tls_load_why(char* why, size_t n) {
   pthread_mutex_lock(&tls_gate);
-  if (tls_ready == 0) {
+  if (tls_ready != 1) {
     tls_ready = tls_load_now();
   }
   int r = tls_ready;
+  if (r != 1 && why != NULL) {
+    snprintf(why, n, "%s", tls_why);
+  }
   pthread_mutex_unlock(&tls_gate);
   return r;
+}
+
+// Refuses renegotiation on a server context: 1 when the option is set.
+static int tls_no_reneg(void* ctx) {
+  if (tls_lib.ctx_options != NULL) {
+    return (tls_lib.ctx_options(ctx, TLS_OP_NO_RENEGOTIATION) & TLS_OP_NO_RENEGOTIATION) != 0;
+  }
+  return ((unsigned long)tls_lib.ctx_ctrl(ctx, TLS_CTRL_OPTIONS, TLS_OP_NO_RENEG_LIBRE, NULL) & TLS_OP_NO_RENEG_LIBRE)
+    == TLS_OP_NO_RENEG_LIBRE;
 }
 
 // The open's arguments and outcome, owned by w->data.
@@ -412,9 +453,8 @@ Term tls_secure_run(Env e, Term* f, IoWork* w) {
   o->key  = io_cstr(e, f[4], &n);
   w->data = (char*)o;
   w->time = io_until((u32)f[5] == 0 ? 30000 : f[5]);
-  if (tls_load() != 1) {
+  if (tls_load_why(o->text, sizeof o->text) != 1) {
     o->code = ENOTSUP;
-    snprintf(o->text, sizeof o->text, "%s", tls_why);
     return tls_secure_fail(e, w);
   }
   void* ctx = tls_lib.ctx_new(tls_lib.client_method());
@@ -422,7 +462,12 @@ Term tls_secure_run(Env e, Term* f, IoWork* w) {
     tls_fail(o, ENOMEM, "TLS: SSL_CTX_new");
     return tls_secure_fail(e, w);
   }
-  tls_lib.ctx_ctrl(ctx, TLS_CTRL_MIN_PROTO, TLS_1_2, NULL);
+  // TLS 1.2 or later, or no connection.
+  if (tls_lib.ctx_ctrl(ctx, TLS_CTRL_MIN_PROTO, TLS_1_2, NULL) != 1) {
+    tls_fail(o, ENOTSUP, "TLS: cannot require TLS 1.2");
+    tls_lib.ctx_free(ctx);
+    return tls_secure_fail(e, w);
+  }
   tls_lib.ctx_set_verify(ctx, 1, NULL);
   static const unsigned char alpn[] = "\x08http/1.1";
   tls_lib.ctx_alpn(ctx, alpn, sizeof alpn - 1);
@@ -507,9 +552,8 @@ static void* tls_server_ctx(TlsOpen* o) {
   if (ctx == NULL) {
     return NULL;
   }
-  tls_lib.ctx_ctrl(ctx, TLS_CTRL_MIN_PROTO, TLS_1_2, NULL);
-  tls_lib.ctx_options(ctx, TLS_OP_NO_RENEGOTIATION);
-  if (*o->cert == 0 || !tls_use_client(o, ctx)) {
+  if (tls_lib.ctx_ctrl(ctx, TLS_CTRL_MIN_PROTO, TLS_1_2, NULL) != 1 || !tls_no_reneg(ctx)
+      || *o->cert == 0 || !tls_use_client(o, ctx)) {
     tls_lib.ctx_free(ctx);
     return NULL;
   }
@@ -550,9 +594,8 @@ Term tls_accept_run(Env e, Term* f, IoWork* w) {
   setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
   signal(SIGPIPE, SIG_IGN);
-  if (tls_load() != 1) {
+  if (tls_load_why(o->text, sizeof o->text) != 1) {
     o->code = ENOTSUP;
-    snprintf(o->text, sizeof o->text, "%s", tls_why);
     return tls_secure_fail(e, w);
   }
   void* ctx = tls_server_ctx(o);
@@ -727,6 +770,16 @@ Term tls_close_run(Env e, Term* f, IoWork* w) {
   return term_pak(CID(Unit), 0);
 }
 
+// Tls.available(): loads OpenSSL (when not yet loaded) and opens nothing;
+// Done when it loaded, else Fail with ENOTSUP and the loader's reason.
+Term tls_available_run(Env e, Term* f, IoWork* w) {
+  char why[256];
+  if (tls_load_why(why, sizeof why) != 1) {
+    return io_fail(e, ENOTSUP, why);
+  }
+  return io_done(e, term_pak(CID(Unit), 0));
+}
+
 #ifdef CID(Tls.dial)
 static void __attribute__((constructor)) tls_dial_use(void) {
   // A write to a peer that hung up must fail with EPIPE, not kill us.
@@ -768,5 +821,11 @@ static void __attribute__((constructor)) tls_close_use(void) {
 #ifdef CID(Tls.accept)
 static void __attribute__((constructor)) tls_accept_use(void) {
   io_eff(CID(Tls.accept), tls_accept_run);
+}
+#endif
+
+#ifdef CID(Tls.available)
+static void __attribute__((constructor)) tls_available_use(void) {
+  io_eff(CID(Tls.available), tls_available_run);
 }
 #endif
