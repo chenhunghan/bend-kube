@@ -44,3 +44,4 @@ import ./src/watcher.bend as Watcher
 import ./src/webhook.bend as Webhook
 import ./src/ws.bend as Ws
 import ./src/yaml.bend as Yaml
+import ./src/zip.bend as Zip

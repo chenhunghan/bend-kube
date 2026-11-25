@@ -1,6 +1,7 @@
 # The tools tools/ci.sh needs, in a debian:trixie-slim job container: clang
 # with sanitizer runtimes, OpenSSL, curl (with HTTP/2), grpcurl (a grpc-go
-# client, for tests/grpc.sh), the pinned Bend, and the Lean toolchain
+# client, for tests/grpc.sh), liblz4 and unsquashfs (tests/zip.sh reads its
+# blocks back with them), the pinned Bend, and the Lean toolchain
 # `bend --verdict` builds its kernel with (cached with the built kernel).
 name: setup
 description: Install clang, OpenSSL, Bend and Lean for tools/ci.sh
@@ -12,7 +13,7 @@ runs:
       run: |
         apt-get update
         apt-get install -y --no-install-recommends ca-certificates curl git clang \
-          libclang-rt-dev llvm libssl3t64 openssl python3 perl zstd
+          libclang-rt-dev llvm libssl3t64 openssl python3 perl zstd liblz4-1 squashfs-tools
     - name: Cache Lean and the BendTT kernel
       uses: actions/cache@v4
       with:

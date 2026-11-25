@@ -16,7 +16,9 @@
 #  10. gRPC serves Bend's client and grpcurl (grpc-go), under sanitizers
 #      (tests/grpc.sh);
 #  11. gzip and zstd decompress, through zlib, libzstd and pure Bend, and
-#      refuse bad streams, under sanitizers (tests/unz.sh).
+#      refuse bad streams, under sanitizers (tests/unz.sh);
+#  12. blocks compress to LZ4 that a strict decoder, liblz4 and unsquashfs
+#      read back, under sanitizers (tests/zip.sh).
 # On macOS with a newer SDK than clang's linker knows, set SDKROOT to an
 # older SDK (for example .../MacOSX26.5.sdk).
 set -eu
@@ -40,7 +42,7 @@ for m in json utf8 base64 yaml http ws pb hpack h2 grpc gzip core config proxy w
 done
 
 step "IO modules"
-for m in net sys unz h2io grpcio client stream exec log runtime leader serve helpers kube webhook; do
+for m in net sys unz zip h2io grpcio client stream exec log runtime leader serve helpers kube webhook; do
   out=$(bend src/$m.bend --check-only 2>&1) || true
   # The only acceptable complaint is the foreign effects themselves.
   rest=$(echo "$out" | grep -v "SOME PROOFS FAIL\|rely on unsafe or foreign code\|defs that depend on foreign effects\|^Hint: no law" || true)
@@ -93,4 +95,7 @@ tests/grpc.sh
 
 step "decompression"
 tests/unz.sh
+
+step "compression"
+tests/zip.sh
 printf '\nall gates pass\n'
