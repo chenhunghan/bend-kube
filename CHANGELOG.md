@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/chenhunghan/bend-kube/compare/v0.11.0...v0.12.0) (2026-11-25)
+
+
+### Features
+
+* LZ4 block compression for file system images (src/zip.bend) ([184e4c3](https://github.com/chenhunghan/bend-kube/commit/184e4c3a106b0ce6ea62379ba15bc9e7bb231d49))
+
 ## [0.11.0](https://github.com/chenhunghan/bend-kube/compare/v0.10.0...v0.11.0) (2026-11-24)
 
 
